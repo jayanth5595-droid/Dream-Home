@@ -1,331 +1,373 @@
 /* =========================================================
    DREAM HOME v3
-   Loan tracker - public view / owner-only editing
+   Common Loan Principal System
+   Public View + Owner-only Editing
+   Supabase Cloud Sync
    ========================================================= */
 
 const CFG = window.DREAM_HOME || {};
 
-const READY =
+const ready =
   CFG.url &&
   !CFG.url.includes("PASTE_") &&
   CFG.key &&
   !CFG.key.includes("PASTE_");
 
-const db = READY
+const db = ready
   ? supabase.createClient(CFG.url, CFG.key)
   : null;
 
 let user = null;
 let loan = null;
-let borrowers = [];
-let paymentsData = [];
+let bs = [];
+let ps = [];
+
+/* =========================================================
+   HELPERS
+   ========================================================= */
 
 const $ = id => document.getElementById(id);
 
-const money = value =>
+const M = n =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
     maximumFractionDigits: 0
-  }).format(Math.round(Number(value) || 0));
+  }).format(Math.round(Number(n) || 0));
 
-const number = value => Number(value) || 0;
-
-const esc = value =>
-  String(value ?? "")
+const esc = x =>
+  String(x ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 
+function toast(message, type = "normal") {
+  const t = $("toast");
+
+  if (!t) return;
+
+  t.className = "toast " + type;
+  t.textContent = message;
+  t.style.display = "block";
+
+  clearTimeout(window.toastTimer);
+
+  window.toastTimer = setTimeout(() => {
+    t.style.display = "none";
+  }, 2500);
+}
+
+function sync(state) {
+  const s = $("sync");
+
+  if (!s) return;
+
+  s.className =
+    state === "ok"
+      ? "ok"
+      : state === "bad"
+      ? "bad"
+      : "";
+}
+
+function edit() {
+  return !!user && !!loan && loan.created_by === user.id;
+}
+
+function monthlyRate() {
+  if (!loan) return 0;
+
+  return (Number(loan.annual_rate) || 0) / 1200;
+}
 
 /* =========================================================
-   TOAST / POPUPS
+   EMI
    ========================================================= */
 
-function toast(message, type = "info") {
-  const box = $("toast");
-  if (!box) return;
+function emi(principal, months) {
+  principal = Number(principal) || 0;
+  months = Number(months) || 0;
 
-  box.className = `toast ${type}`;
-  box.innerHTML = `
-    <div class="toast-icon">
-      ${type === "success" ? "✓" : type === "error" ? "!" : "i"}
-    </div>
-    <div>${esc(message)}</div>
-  `;
+  if (!principal || !months) return 0;
 
-  box.style.display = "flex";
+  const r = monthlyRate();
 
-  clearTimeout(window.__toastTimer);
+  if (!r) return principal / months;
 
-  window.__toastTimer = setTimeout(() => {
-    box.style.display = "none";
-  }, 2600);
-}
-
-
-function openModal(html) {
-  const modal = $("modal");
-  const body = $("mb");
-
-  if (!modal || !body) return;
-
-  body.innerHTML = html;
-  modal.classList.add("open");
-}
-
-
-function closeModal() {
-  const modal = $("modal");
-  if (modal) modal.classList.remove("open");
-}
-
-
-if ($("x")) {
-  $("x").onclick = closeModal;
-}
-
-if ($("modal")) {
-  $("modal").onclick = e => {
-    if (e.target === $("modal")) {
-      closeModal();
-    }
-  };
-}
-
-
-/* =========================================================
-   CLOUD STATUS
-   ========================================================= */
-
-function cloudStatus(state) {
-  const dot = $("sync");
-  if (!dot) return;
-
-  dot.className = "";
-
-  if (state === "ok") {
-    dot.classList.add("ok");
-    dot.title = "Cloud connected";
-  } else if (state === "bad") {
-    dot.classList.add("bad");
-    dot.title = "Cloud connection error";
-  } else {
-    dot.title = "Connecting to cloud...";
-  }
-}
-
-
-/* =========================================================
-   AUTH
-   ========================================================= */
-
-function isOwner() {
-  return !!(
-    user &&
-    loan &&
-    loan.created_by &&
-    loan.created_by === user.id
+  return (
+    principal *
+    r *
+    Math.pow(1 + r, months) /
+    (Math.pow(1 + r, months) - 1)
   );
 }
 
+function overallEMI() {
+  if (!loan) return 0;
 
-function accountPopup() {
-  if (!db) {
-    openModal(`
-      <div class="popup-head">
-        <div class="popup-icon">☁</div>
-        <div>
-          <h2>Cloud not connected</h2>
-          <p class="muted">
-            Supabase connection is not configured correctly.
-          </p>
-        </div>
-      </div>
-
-      <button class="btn soft" onclick="closeModal()">
-        Close
-      </button>
-    `);
-
-    return;
+  if (loan.emi_mode === "manual") {
+    return Number(loan.manual_emi) || 0;
   }
 
-  if (user) {
-    openModal(`
-      <div class="popup-head">
-        <div class="popup-icon">✓</div>
-        <div>
-          <h2>Owner account</h2>
-          <p class="muted">${esc(user.email)}</p>
-        </div>
-      </div>
-
-      <div class="account-status">
-        <span class="status-dot"></span>
-        Owner editing access enabled
-      </div>
-
-      <button class="btn danger" onclick="signOut()">
-        Sign out
-      </button>
-
-      <button class="btn soft" onclick="closeModal()">
-        Cancel
-      </button>
-    `);
-
-    return;
-  }
-
-  openModal(`
-    <div class="popup-head">
-      <div class="popup-icon">🔐</div>
-      <div>
-        <h2>Owner access</h2>
-        <p class="muted">
-          Public users can view the loan.
-          Only the owner can edit it.
-        </p>
-      </div>
-    </div>
-
-    <label>
-      Email
-      <input id="loginEmail" type="email"
-             placeholder="Owner email">
-    </label>
-
-    <label>
-      Password
-      <input id="loginPassword" type="password"
-             placeholder="Password">
-    </label>
-
-    <button class="btn primary" onclick="signIn()">
-      Sign in
-    </button>
-
-    <button class="btn soft" onclick="createOwner()">
-      Create owner account
-    </button>
-  `);
+  return emi(
+    Number(loan.total_amount),
+    Number(loan.tenure_months)
+  );
 }
 
+/* =========================================================
+   DATE / MONTH
+   ========================================================= */
 
-async function signIn() {
-  if (!db) return;
-
-  const email = $("loginEmail")?.value.trim();
-  const password = $("loginPassword")?.value;
-
-  if (!email || !password) {
-    toast("Enter email and password.", "error");
-    return;
+function monthLabel(monthNo) {
+  if (!loan || !loan.start_date) {
+    return "Month " + monthNo;
   }
 
-  const result = await db.auth.signInWithPassword({
-    email,
-    password
+  const d = new Date(loan.start_date + "T00:00:00");
+
+  d.setMonth(d.getMonth() + Number(monthNo) - 1);
+
+  return d.toLocaleDateString("en-IN", {
+    month: "short",
+    year: "numeric"
   });
-
-  if (result.error) {
-    toast(result.error.message, "error");
-    return;
-  }
-
-  closeModal();
-
-  toast("Welcome back. Owner access enabled.", "success");
-
-  await load();
 }
 
+function monthDate(monthNo) {
+  if (!loan || !loan.start_date) return null;
 
-async function createOwner() {
-  if (!db) return;
+  const d = new Date(loan.start_date + "T00:00:00");
 
-  const email = $("loginEmail")?.value.trim();
-  const password = $("loginPassword")?.value;
+  d.setMonth(d.getMonth() + Number(monthNo) - 1);
 
-  if (!email || !password) {
-    toast("Enter email and password first.", "error");
-    return;
+  return d;
+}
+
+/* =========================================================
+   PAYMENT FINDER
+   ========================================================= */
+
+function getPayment(monthNo, borrowerId) {
+  return (
+    ps.find(
+      p =>
+        Number(p.month_no) === Number(monthNo) &&
+        p.borrower_id === borrowerId
+    ) || {
+      emi_paid: 0,
+      extra_principal: 0
+    }
+  );
+}
+
+/* =========================================================
+   COMMON LOAN CALCULATION
+   =========================================================
+
+   IMPORTANT:
+
+   There is NO borrower principal share.
+
+   The entire loan starts from loan.total_amount.
+
+   Interest is calculated on the remaining COMMON
+   principal every month.
+
+   Regular EMI:
+      EMI - interest = principal
+
+   During interest-only period:
+      EMI pays interest only.
+
+   Extra payment:
+      100% directly reduces common principal.
+
+   ========================================================= */
+
+function calculateLoan(upToMonth) {
+  if (!loan) {
+    return {
+      balance: 0,
+      principalPaid: 0,
+      regularPrincipalPaid: 0,
+      extraPaid: 0,
+      interestDue: 0,
+      interestPaid: 0,
+      unpaidInterest: 0,
+      totalPaid: 0
+    };
   }
 
-  if (password.length < 6) {
-    toast("Password must contain at least 6 characters.", "error");
-    return;
-  }
+  let balance = Number(loan.total_amount) || 0;
 
-  const result = await db.auth.signUp({
-    email,
-    password
-  });
+  let principalPaid = 0;
+  let regularPrincipalPaid = 0;
+  let extraPaid = 0;
 
-  if (result.error) {
-    toast(result.error.message, "error");
-    return;
-  }
+  let interestDueTotal = 0;
+  let interestPaidTotal = 0;
+  let unpaidInterestTotal = 0;
 
-  closeModal();
+  let totalPaid = 0;
 
-  if (result.data?.session) {
-    toast("Owner account created.", "success");
-  } else {
-    toast(
-      "Account created. Check your email if confirmation is enabled.",
-      "success"
+  const rate = monthlyRate();
+
+  const interestOnlyMonths =
+    Number(loan.interest_only_months) || 0;
+
+  const endMonth =
+    Number(upToMonth) ||
+    Number(loan.tenure_months) ||
+    0;
+
+  for (let month = 1; month <= endMonth; month++) {
+
+    if (balance <= 0) break;
+
+    const monthPayments = ps.filter(
+      p => Number(p.month_no) === month
     );
+
+    const regularEMI = monthPayments.reduce(
+      (sum, p) =>
+        sum + (Number(p.emi_paid) || 0),
+      0
+    );
+
+    const extra = monthPayments.reduce(
+      (sum, p) =>
+        sum + (Number(p.extra_principal) || 0),
+      0
+    );
+
+    const interestDue = balance * rate;
+
+    interestDueTotal += interestDue;
+
+    /*
+      First regular EMI pays interest.
+    */
+
+    const interestPaid =
+      Math.min(regularEMI, interestDue);
+
+    interestPaidTotal += interestPaid;
+
+    if (regularEMI < interestDue) {
+      unpaidInterestTotal +=
+        interestDue - regularEMI;
+    }
+
+    let regularPrincipal = 0;
+
+    /*
+      Interest-only period.
+    */
+
+    if (month > interestOnlyMonths) {
+      regularPrincipal = Math.min(
+        Math.max(
+          0,
+          regularEMI - interestDue
+        ),
+        balance
+      );
+    }
+
+    /*
+      Extra payment ALWAYS goes directly
+      toward principal.
+    */
+
+    const extraPrincipal = Math.min(
+      Math.max(0, extra),
+      Math.max(
+        0,
+        balance - regularPrincipal
+      )
+    );
+
+    balance -= regularPrincipal;
+    balance -= extraPrincipal;
+
+    balance = Math.max(0, balance);
+
+    regularPrincipalPaid += regularPrincipal;
+    extraPaid += extraPrincipal;
+
+    principalPaid +=
+      regularPrincipal + extraPrincipal;
+
+    totalPaid +=
+      regularEMI + extra;
   }
 
-  await load();
+  return {
+    balance,
+    principalPaid,
+    regularPrincipalPaid,
+    extraPaid,
+    interestDue: interestDueTotal,
+    interestPaid: interestPaidTotal,
+    unpaidInterest: unpaidInterestTotal,
+    totalPaid
+  };
 }
 
+/* =========================================================
+   PERSON CONTRIBUTION
+   ========================================================= */
 
-async function signOut() {
-  if (!db) return;
+function personStats(borrowerId) {
+  const personPayments = ps.filter(
+    p => p.borrower_id === borrowerId
+  );
 
-  const result = await db.auth.signOut();
+  let emiPaid = 0;
+  let extraPaid = 0;
 
-  if (result.error) {
-    toast(result.error.message, "error");
-    return;
-  }
+  personPayments.forEach(p => {
+    emiPaid += Number(p.emi_paid) || 0;
+    extraPaid +=
+      Number(p.extra_principal) || 0;
+  });
 
-  closeModal();
-
-  user = null;
-
-  toast("Signed out. App is now view-only.", "success");
-
-  await load();
+  return {
+    emiPaid,
+    extraPaid,
+    totalPaid: emiPaid + extraPaid
+  };
 }
-
 
 /* =========================================================
    NAVIGATION
    ========================================================= */
 
-function nav(screen) {
-  document.querySelectorAll(".screen").forEach(el => {
-    el.classList.remove("active");
-  });
+function nav(id) {
 
-  const target = $(screen);
+  document
+    .querySelectorAll(".screen")
+    .forEach(x =>
+      x.classList.remove("active")
+    );
 
-  if (target) {
-    target.classList.add("active");
+  const screen = $(id);
+
+  if (screen) {
+    screen.classList.add("active");
   }
 
-  document.querySelectorAll("nav button").forEach(btn => {
-    btn.classList.toggle(
-      "active",
-      btn.dataset.s === screen
+  document
+    .querySelectorAll("nav button")
+    .forEach(x =>
+      x.classList.toggle(
+        "active",
+        x.dataset.s === id
+      )
     );
-  });
 
   const titles = {
     dashboard: "Dashboard",
@@ -337,476 +379,61 @@ function nav(screen) {
 
   if ($("title")) {
     $("title").textContent =
-      titles[screen] || "Dream Home";
+      titles[id] || "Dream Home";
   }
 
-  if (screen === "dashboard") dashboard();
-  if (screen === "payments") payments();
-  if (screen === "people") people();
-  if (screen === "reports") reports();
-  if (screen === "more") more();
+  if (id === "dashboard") dashboard();
+  if (id === "payments") payments();
+  if (id === "people") people();
+  if (id === "reports") reports();
+  if (id === "more") more();
 }
-
-
-document.querySelectorAll("nav button").forEach(btn => {
-  btn.onclick = () => nav(btn.dataset.s);
-});
-
 
 /* =========================================================
    ACCOUNT ICON
    ========================================================= */
 
 if ($("account")) {
-  $("account").onclick = accountPopup;
-}
+  $("account").onclick = () => {
 
-
-/* =========================================================
-   DATE / MONTH HELPERS
-   ========================================================= */
-
-function parseStartDate() {
-  if (!loan?.start_date) {
-    return new Date();
-  }
-
-  const d = new Date(`${loan.start_date}T00:00:00`);
-
-  return isNaN(d.getTime())
-    ? new Date()
-    : d;
-}
-
-
-function monthDate(monthNumber) {
-  const start = parseStartDate();
-
-  const d = new Date(
-    start.getFullYear(),
-    start.getMonth() + monthNumber - 1,
-    1
-  );
-
-  return d;
-}
-
-
-function monthName(monthNumber) {
-  return monthDate(monthNumber).toLocaleDateString(
-    "en-IN",
-    {
-      month: "short",
-      year: "numeric"
-    }
-  );
-}
-
-
-/* =========================================================
-   LOAN CALCULATIONS
-   ========================================================= */
-
-function monthlyRate() {
-  return number(loan?.annual_rate) / 1200;
-}
-
-
-function standardEMI(principal, monthsRemaining) {
-  const p = number(principal);
-  const n = number(monthsRemaining);
-  const r = monthlyRate();
-
-  if (p <= 0 || n <= 0) return 0;
-
-  if (r === 0) {
-    return p / n;
-  }
-
-  return (
-    p *
-    r *
-    Math.pow(1 + r, n) /
-    (Math.pow(1 + r, n) - 1)
-  );
-}
-
-
-function fixedEMITotal() {
-  return borrowers.reduce(
-    (sum, person) =>
-      sum + number(person.scheduled_emi),
-    0
-  );
-}
-
-
-function minimumEMI(principal, monthNumber) {
-  const interestOnly =
-    number(loan?.interest_only_months) || 0;
-
-  if (monthNumber <= interestOnly) {
-    return principal * monthlyRate();
-  }
-
-  const remainingMonths =
-    Math.max(
-      1,
-      number(loan?.tenure_months) - monthNumber + 1
-    );
-
-  return standardEMI(
-    principal,
-    remainingMonths
-  );
-}
-
-
-/*
-  Calculate the entire loan month-by-month.
-
-  Important:
-  - NO individual principal-share calculation.
-  - Interest is always calculated on the full loan balance.
-  - Fixed EMI contributions are added together.
-  - Any amount above the minimum required payment reduces
-    the overall principal.
-  - Personal extra payments reduce the overall principal too.
-*/
-function calculateLoan() {
-  if (!loan) {
-    return {
-      months: [],
-      remaining: 0,
-      principalPaid: 0,
-      interestPaid: 0,
-      totalPaid: 0,
-      extraPaid: 0,
-      surplusPaid: 0,
-      interestSaved: 0
-    };
-  }
-
-  let balance = number(loan.total_amount);
-
-  let principalPaid = 0;
-  let interestPaid = 0;
-  let totalPaid = 0;
-  let extraPaid = 0;
-  let surplusPaid = 0;
-
-  const months = [];
-
-  const interestOnlyMonths =
-    number(loan.interest_only_months) || 0;
-
-  const totalFixedEMI = fixedEMITotal();
-
-  for (
-    let m = 1;
-    m <= number(loan.tenure_months);
-    m++
-  ) {
-    const opening = balance;
-
-    if (balance <= 0) {
-      months.push({
-        month: m,
-        name: monthName(m),
-        opening: 0,
-        interest: 0,
-        fixedEMI: 0,
-        extra: 0,
-        surplus: 0,
-        principal: 0,
-        total: 0,
-        closing: 0
-      });
-
-      continue;
-    }
-
-    const interest =
-      opening * monthlyRate();
-
-    const monthRows =
-      paymentsData.filter(
-        x => number(x.month_no) === m
-      );
-
-    /*
-      We normally assume each person's fixed EMI is paid.
-
-      If an owner edits EMI paid for a month in the database,
-      that actual amount is respected.
-    */
-    let actualEMI = 0;
-
-    borrowers.forEach(person => {
-      const row = monthRows.find(
-        x => x.borrower_id === person.id
-      );
-
-      if (
-        row &&
-        row.emi_paid !== null &&
-        row.emi_paid !== undefined
-      ) {
-        actualEMI += number(row.emi_paid);
-      } else {
-        actualEMI += number(person.scheduled_emi);
-      }
-    });
-
-    /*
-      Personal extra contributions.
-    */
-    const personalExtra = monthRows.reduce(
-      (sum, row) =>
-        sum + number(row.extra_principal),
-      0
-    );
-
-    /*
-      During interest-only period, fixed EMI is treated as
-      interest payment only.
-
-      After interest-only period:
-      - interest is paid first
-      - remaining fixed EMI reduces principal
-      - if fixed EMI is greater than minimum EMI,
-        the excess is treated as additional principal
-    */
-
-    let regularPrincipal = 0;
-
-    if (m <= interestOnlyMonths) {
-      regularPrincipal = 0;
+    if (user) {
+      accountPopup();
     } else {
-      regularPrincipal = Math.max(
-        0,
-        Math.min(
-          balance,
-          actualEMI - interest
-        )
-      );
+      auth();
     }
 
-    /*
-      Minimum EMI check.
-
-      If the combined fixed EMIs are higher than the minimum
-      EMI required, the difference is separately classified
-      as surplus principal.
-
-      We do not double-count it.
-    */
-    let surplus = 0;
-
-    if (m > interestOnlyMonths) {
-      const minEMI =
-        minimumEMI(
-          opening,
-          m
-        );
-
-      surplus = Math.max(
-        0,
-        actualEMI - minEMI
-      );
-
-      /*
-        The regular principal already contains the whole
-        amount above interest. Therefore surplus is a
-        classification of part of regular principal, not
-        an additional amount.
-      */
-      surplus = Math.min(
-        surplus,
-        regularPrincipal
-      );
-    }
-
-    const extra = Math.min(
-      personalExtra,
-      Math.max(
-        0,
-        balance - regularPrincipal
-      )
-    );
-
-    const totalPrincipal =
-      Math.min(
-        balance,
-        regularPrincipal + extra
-      );
-
-    const actualTotalPaid =
-      Math.min(
-        opening + interest,
-        actualEMI + personalExtra
-      );
-
-    const unpaidInterest =
-      Math.max(
-        0,
-        interest - actualEMI
-      );
-
-    balance =
-      Math.max(
-        0,
-        balance - totalPrincipal
-      );
-
-    principalPaid += totalPrincipal;
-    interestPaid += Math.min(
-      interest,
-      actualEMI
-    );
-
-    totalPaid += actualTotalPaid;
-
-    extraPaid += extra;
-    surplusPaid += surplus;
-
-    months.push({
-      month: m,
-      name: monthName(m),
-      opening,
-      interest,
-      fixedEMI: actualEMI,
-      extra,
-      surplus,
-      principal: totalPrincipal,
-      total: actualTotalPaid,
-      closing: balance,
-      unpaidInterest
-    });
-  }
-
-  /*
-    Estimate interest saved by extra payments.
-
-    This compares the current schedule against the schedule
-    without personal extra payments, using the same fixed EMI.
-  */
-  const interestSaved =
-    calculateInterestWithoutExtras() -
-    interestPaid;
-
-  return {
-    months,
-    remaining: balance,
-    principalPaid,
-    interestPaid,
-    totalPaid,
-    extraPaid,
-    surplusPaid,
-    interestSaved: Math.max(0, interestSaved)
   };
 }
 
-
 /* =========================================================
-   INTEREST SAVING CALCULATION
-   ========================================================= */
-
-function calculateInterestWithoutExtras() {
-  if (!loan) return 0;
-
-  let balance =
-    number(loan.total_amount);
-
-  let totalInterest = 0;
-
-  const interestOnlyMonths =
-    number(loan.interest_only_months) || 0;
-
-  const fixedEMI =
-    fixedEMITotal();
-
-  for (
-    let m = 1;
-    m <= number(loan.tenure_months);
-    m++
-  ) {
-    if (balance <= 0) break;
-
-    const interest =
-      balance * monthlyRate();
-
-    totalInterest += interest;
-
-    let principal = 0;
-
-    if (m > interestOnlyMonths) {
-      principal = Math.max(
-        0,
-        Math.min(
-          balance,
-          fixedEMI - interest
-        )
-      );
-    }
-
-    balance =
-      Math.max(
-        0,
-        balance - principal
-      );
-  }
-
-  return totalInterest;
-}
-
-
-/* =========================================================
-   PAYMENT LOOKUP
-   ========================================================= */
-
-function getPayment(monthNo, borrowerId) {
-  return (
-    paymentsData.find(
-      p =>
-        number(p.month_no) === number(monthNo) &&
-        p.borrower_id === borrowerId
-    ) || null
-  );
-}
-
-
-/* =========================================================
-   LOAD FROM SUPABASE
+   LOAD CLOUD DATA
    ========================================================= */
 
 async function load() {
-  cloudStatus("");
 
   if (!db) {
-    user = null;
-    loan = null;
-    borrowers = [];
-    paymentsData = [];
-
-    cloudStatus("bad");
+    sync("bad");
     dashboard();
-
     return;
   }
 
   try {
+
+    sync("");
+
     const authResult =
       await db.auth.getUser();
 
     user =
-      authResult?.data?.user || null;
+      authResult.data?.user || null;
 
     /*
-      Load the first loan.
+      Load the loan.
 
-      Existing Dream Home uses one loan.
+      Public users can read the loan.
+      Owner can also edit.
     */
+
     const loanResult =
       await db
         .from("loans")
@@ -819,85 +446,76 @@ async function load() {
 
     if (loanResult.error) {
       console.error(
-        "Loan load error:",
         loanResult.error
       );
-
-      cloudStatus("bad");
-
-      dashboard();
 
       toast(
         loanResult.error.message,
         "error"
       );
 
+      sync("bad");
       return;
     }
 
-    loan = loanResult.data || null;
-
-    borrowers = [];
-    paymentsData = [];
+    loan = loanResult.data;
 
     if (loan) {
-      const borrowerResult =
-        await db
+
+      const [
+        borrowersResult,
+        paymentsResult
+      ] = await Promise.all([
+
+        db
           .from("borrowers")
           .select("*")
           .eq("loan_id", loan.id)
-          .order("sort_order", {
-            ascending: true
-          });
+          .order("sort_order"),
 
-      if (borrowerResult.error) {
-        console.error(
-          borrowerResult.error
-        );
-
-        toast(
-          borrowerResult.error.message,
-          "error"
-        );
-      } else {
-        borrowers =
-          borrowerResult.data || [];
-      }
-
-      const paymentResult =
-        await db
+        db
           .from("monthly_payments")
           .select("*")
           .eq("loan_id", loan.id)
-          .order("month_no", {
-            ascending: true
-          });
+          .order("month_no")
+      ]);
 
-      if (paymentResult.error) {
-        console.error(
-          paymentResult.error
-        );
-
+      if (borrowersResult.error) {
         toast(
-          paymentResult.error.message,
+          borrowersResult.error.message,
           "error"
         );
-      } else {
-        paymentsData =
-          paymentResult.data || [];
       }
+
+      if (paymentsResult.error) {
+        toast(
+          paymentsResult.error.message,
+          "error"
+        );
+      }
+
+      bs =
+        borrowersResult.data || [];
+
+      ps =
+        paymentsResult.data || [];
+
+    } else {
+
+      bs = [];
+      ps = [];
+
     }
 
-    cloudStatus("ok");
+    sync("ok");
 
     dashboard();
 
-  } catch (error) {
-    console.error(error);
+  } catch (err) {
 
-    cloudStatus("bad");
+    console.error(err);
 
-    dashboard();
+    sync("bad");
 
     toast(
       "Unable to connect to cloud.",
@@ -906,40 +524,32 @@ async function load() {
   }
 }
 
-
 /* =========================================================
    DASHBOARD
    ========================================================= */
 
 function dashboard() {
-  const el = $("dashboard");
 
-  if (!el) return;
+  if (!$("dashboard")) return;
 
   if (!loan) {
-    el.innerHTML = `
+
+    $("dashboard").innerHTML = `
       <div class="hero">
         <small>DREAM HOME</small>
-        <strong>Loan Tracker</strong>
+        <strong>Home Loan Tracker</strong>
         <div>
-          Your cloud-connected home loan dashboard.
+          Public view is ready.
         </div>
       </div>
 
       <div class="card">
-        <div class="pt">
-          <div>
-            <h2>Welcome</h2>
-            <p class="muted">
-              ${READY
-                ? "No loan has been created yet."
-                : "Supabase connection needs to be configured."}
-            </p>
-          </div>
-          <span class="pill">
-            ${user ? "OWNER" : "VIEW ONLY"}
-          </span>
-        </div>
+        <h2>Welcome</h2>
+
+        <p class="muted">
+          Owner sign-in is required to create
+          and manage the cloud loan.
+        </p>
 
         ${
           user
@@ -952,8 +562,8 @@ function dashboard() {
             `
             : `
               <p class="muted">
-                Tap the 👤 icon at the top to sign in
-                as the owner.
+                Tap the person icon above
+                to sign in as owner.
               </p>
             `
         }
@@ -963,176 +573,229 @@ function dashboard() {
     return;
   }
 
-  const data = calculateLoan();
+  const result =
+    calculateLoan(
+      Number(loan.tenure_months)
+    );
 
   const original =
-    number(loan.total_amount);
+    Number(loan.total_amount) || 0;
+
+  const principalPaid =
+    result.principalPaid;
+
+  const remaining =
+    Math.max(
+      0,
+      original - principalPaid
+    );
 
   const paidPercent =
     original > 0
-      ? (data.principalPaid / original) * 100
+      ? Math.min(
+          100,
+          (principalPaid / original) * 100
+        )
       : 0;
 
-  const fixedEMI =
-    fixedEMITotal();
+  const totalContribution =
+    bs.reduce(
+      (sum, b) =>
+        sum +
+        personStats(b.id).totalPaid,
+      0
+    );
 
-  const currentMonth =
-    data.months.find(
-      x => x.closing > 0
-    ) || data.months[data.months.length - 1];
+  $("dashboard").innerHTML = `
 
-  el.innerHTML = `
     <div class="hero">
+
       <small>REMAINING PRINCIPAL</small>
 
       <strong>
-        ${money(data.remaining)}
+        ${M(remaining)}
       </strong>
 
       <div>
-        ${money(original)}
-        original loan
-        · ${number(loan.annual_rate)}% p.a.
-        · ${number(loan.tenure_months)} months
+        ${paidPercent.toFixed(2)}%
+        of loan principal paid
       </div>
+
+      <div class="bar">
+        <i
+          style="
+            width:${Math.max(
+              0,
+              Math.min(100, paidPercent)
+            )}%
+          ">
+        </i>
+      </div>
+
     </div>
 
     <div class="metrics">
 
       <div class="metric">
-        <small>Principal paid</small>
+        <small>Original Loan</small>
         <strong>
-          ${money(data.principalPaid)}
+          ${M(original)}
         </strong>
       </div>
 
       <div class="metric">
-        <small>Interest paid</small>
+        <small>Principal Paid</small>
         <strong>
-          ${money(data.interestPaid)}
+          ${M(principalPaid)}
         </strong>
       </div>
 
       <div class="metric">
-        <small>Total paid</small>
+        <small>Interest Paid</small>
         <strong>
-          ${money(data.totalPaid)}
+          ${M(result.interestPaid)}
         </strong>
       </div>
 
       <div class="metric">
-        <small>Loan paid</small>
+        <small>Extra Paid</small>
         <strong>
-          ${paidPercent.toFixed(1)}%
-        </strong>
-      </div>
-
-      <div class="metric">
-        <small>Extra principal</small>
-        <strong>
-          ${money(data.extraPaid)}
-        </strong>
-      </div>
-
-      <div class="metric">
-        <small>Interest saved</small>
-        <strong>
-          ${money(data.interestSaved)}
+          ${M(result.extraPaid)}
         </strong>
       </div>
 
     </div>
 
     <div class="card">
+
       <div class="pt">
-        <div>
-          <h2>Loan summary</h2>
-          <div class="muted">
-            ${
-              currentMonth
-                ? `Current schedule: ${esc(currentMonth.name)}`
-                : ""
-            }
-          </div>
-        </div>
+
+        <h2>Loan Summary</h2>
 
         <span class="pill">
-          ${isOwner() ? "OWNER" : "VIEW ONLY"}
+          ${loan.annual_rate}% ·
+          ${loan.tenure_months} months
         </span>
+
       </div>
 
       <div class="row">
-        <span>Original loan</span>
-        <b>${money(original)}</b>
+        <span>Overall EMI</span>
+        <b>${M(overallEMI())}</b>
       </div>
 
       <div class="row">
         <span>Remaining principal</span>
-        <b>${money(data.remaining)}</b>
-      </div>
-
-      <div class="row">
-        <span>Fixed monthly EMI</span>
-        <b>${money(fixedEMI)}</b>
-      </div>
-
-      <div class="row">
-        <span>Annual interest</span>
-        <b>${number(loan.annual_rate)}%</b>
-      </div>
-
-      <div class="row">
-        <span>Interest-only period</span>
-        <b>
-          ${
-            number(loan.interest_only_months)
-          } months
-        </b>
+        <b>${M(remaining)}</b>
       </div>
 
       <div class="row">
         <span>Loan paid</span>
-        <b>${paidPercent.toFixed(1)}%</b>
-      </div>
-
-      <div class="bar">
-        <i style="width:${Math.min(
-          100,
-          Math.max(0, paidPercent)
-        )}%"></i>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="pt">
-        <h2>People</h2>
-        <span class="pill">
-          ${borrowers.length}
-        </span>
+        <b>${paidPercent.toFixed(2)}%</b>
       </div>
 
       ${
-        borrowers.length
-          ? borrowers
-              .map(renderPersonSummary)
-              .join("")
+        result.unpaidInterest > 0
+          ? `
+            <div class="row">
+              <span>Unpaid interest</span>
+              <b>
+                ${M(result.unpaidInterest)}
+              </b>
+            </div>
+          `
+          : ""
+      }
+
+    </div>
+
+    <div class="card">
+
+      <div class="pt">
+        <h2>Contributions</h2>
+      </div>
+
+      ${
+        bs.length
+          ? bs.map(b => {
+
+              const s =
+                personStats(b.id);
+
+              const contributionPercent =
+                totalContribution > 0
+                  ? (
+                      s.totalPaid /
+                      totalContribution
+                    ) * 100
+                  : 0;
+
+              return `
+                <div class="person">
+
+                  <div class="pt">
+
+                    <b>
+                      ${esc(b.name)}
+                    </b>
+
+                    <span class="pill">
+                      ${M(b.scheduled_emi)}/mo
+                    </span>
+
+                  </div>
+
+                  <div class="muted">
+                    Total paid
+                  </div>
+
+                  <div class="bal">
+                    ${M(s.totalPaid)}
+                  </div>
+
+                  <div class="bar">
+                    <i
+                      style="
+                        width:${Math.min(
+                          100,
+                          contributionPercent
+                        )}%
+                      ">
+                    </i>
+                  </div>
+
+                  <div class="muted">
+                    EMI:
+                    ${M(s.emiPaid)}
+                    · Extra:
+                    ${M(s.extraPaid)}
+                    ·
+                    ${contributionPercent.toFixed(2)}%
+                    of total paid
+                  </div>
+
+                </div>
+              `;
+
+            }).join("")
           : `
             <div class="empty">
-              No borrowers added.
+              No borrowers added yet.
             </div>
           `
       }
+
     </div>
 
     ${
-      isOwner()
+      edit()
         ? `
           <div class="actions">
 
             <button
               class="btn primary"
               onclick="payment()">
-              ＋ Record Payment
+              ＋ Add Payment
             </button>
 
             <button
@@ -1148,1016 +811,25 @@ function dashboard() {
   `;
 }
 
-
-function renderPersonSummary(person) {
-  const rows =
-    paymentsData.filter(
-      p => p.borrower_id === person.id
-    );
-
-  const emiPaid =
-    rows.reduce(
-      (sum, row) =>
-        sum + number(row.emi_paid),
-      0
-    );
-
-  const extra =
-    rows.reduce(
-      (sum, row) =>
-        sum + number(row.extra_principal),
-      0
-    );
-
-  const total =
-    emiPaid + extra;
-
-  const loanTotal =
-    number(loan.total_amount);
-
-  const percent =
-    loanTotal > 0
-      ? (total / loanTotal) * 100
-      : 0;
-
-  return `
-    <div class="person">
-
-      <div class="pt">
-        <b>${esc(person.name)}</b>
-
-        <span class="pill">
-          ${money(person.scheduled_emi)}/mo
-        </span>
-      </div>
-
-      <div class="row">
-        <span>EMI paid</span>
-        <b>${money(emiPaid)}</b>
-      </div>
-
-      <div class="row">
-        <span>Extra paid</span>
-        <b>${money(extra)}</b>
-      </div>
-
-      <div class="row">
-        <span>Total contribution</span>
-        <b>${money(total)}</b>
-      </div>
-
-      <div class="row">
-        <span>% of total loan</span>
-        <b>${percent.toFixed(2)}%</b>
-      </div>
-
-    </div>
-  `;
-}
-
-
 /* =========================================================
-   CREATE LOAN
-   ========================================================= */
-
-function loanCreate() {
-  if (!isOwner() && user) {
-    /*
-      A newly signed-up owner may not have a loan yet,
-      therefore allow creation when user exists.
-    */
-  }
-
-  if (!user) {
-    accountPopup();
-    return;
-  }
-
-  openModal(`
-    <h2>Create Dream Home Loan</h2>
-
-    <p class="muted">
-      Enter the overall loan details first.
-      Borrowers can be added afterwards.
-    </p>
-
-    <label>
-      Loan name
-      <input id="newLoanName"
-             value="Dream Home Loan">
-    </label>
-
-    <div class="grid">
-
-      <label>
-        Overall loan amount
-        <input id="newLoanAmount"
-               type="number"
-               value="4500000">
-      </label>
-
-      <label>
-        Annual interest %
-        <input id="newLoanRate"
-               type="number"
-               step="0.01"
-               value="8.9">
-      </label>
-
-      <label>
-        Tenure (months)
-        <input id="newLoanTenure"
-               type="number"
-               value="240">
-      </label>
-
-      <label>
-        Start date
-        <input id="newLoanStart"
-               type="date">
-      </label>
-
-      <label>
-        Interest-only months
-        <input id="newLoanInterestOnly"
-               type="number"
-               min="0"
-               value="0">
-      </label>
-
-    </div>
-
-    <button
-      class="btn primary"
-      onclick="saveNewLoan()">
-      Create Loan
-    </button>
-  `);
-
-  if ($("newLoanStart")) {
-    const today =
-      new Date().toISOString().slice(0, 10);
-
-    $("newLoanStart").value = today;
-  }
-}
-
-
-async function saveNewLoan() {
-  if (!db || !user) return;
-
-  const data = {
-    name:
-      $("newLoanName").value.trim() ||
-      "Dream Home Loan",
-
-    total_amount:
-      number($("newLoanAmount").value),
-
-    annual_rate:
-      number($("newLoanRate").value),
-
-    tenure_months:
-      number($("newLoanTenure").value),
-
-    start_date:
-      $("newLoanStart").value,
-
-    interest_only_months:
-      number($("newLoanInterestOnly").value),
-
-    emi_mode: "auto",
-
-    manual_emi: 0,
-
-    created_by: user.id
-  };
-
-  if (
-    data.total_amount <= 0 ||
-    data.tenure_months <= 0
-  ) {
-    toast(
-      "Enter a valid loan amount and tenure.",
-      "error"
-    );
-    return;
-  }
-
-  const result =
-    await db
-      .from("loans")
-      .insert(data)
-      .select()
-      .single();
-
-  if (result.error) {
-    toast(
-      result.error.message,
-      "error"
-    );
-    return;
-  }
-
-  closeModal();
-
-  toast(
-    "Dream Home loan created.",
-    "success"
-  );
-
-  await load();
-}
-
-
-/* =========================================================
-   LOAN SETTINGS
-   ========================================================= */
-
-function loanEdit() {
-  if (!isOwner()) {
-    accountPopup();
-    return;
-  }
-
-  openModal(`
-    <h2>Loan Settings</h2>
-
-    <div class="grid">
-
-      <label class="full">
-        Loan name
-        <input id="loanName"
-               value="${esc(loan.name)}">
-      </label>
-
-      <label>
-        Overall loan amount
-        <input id="loanAmount"
-               type="number"
-               value="${number(loan.total_amount)}">
-      </label>
-
-      <label>
-        Annual interest %
-        <input id="loanRate"
-               type="number"
-               step="0.01"
-               value="${number(loan.annual_rate)}">
-      </label>
-
-      <label>
-        Tenure (months)
-        <input id="loanTenure"
-               type="number"
-               value="${number(loan.tenure_months)}">
-      </label>
-
-      <label>
-        Start date
-        <input id="loanStart"
-               type="date"
-               value="${loan.start_date || ""}">
-      </label>
-
-      <label>
-        Interest-only months
-        <input id="loanInterestOnly"
-               type="number"
-               min="0"
-               value="${number(loan.interest_only_months)}">
-      </label>
-
-    </div>
-
-    <button
-      class="btn primary"
-      onclick="saveLoanSettings()">
-      Save Settings
-    </button>
-
-    <button
-      class="btn danger"
-      onclick="confirmLoanReset()">
-      🔄 Loan Reset
-    </button>
-  `);
-}
-
-
-async function saveLoanSettings() {
-  if (!isOwner()) return;
-
-  const values = {
-    name:
-      $("loanName").value.trim() ||
-      "Dream Home Loan",
-
-    total_amount:
-      number($("loanAmount").value),
-
-    annual_rate:
-      number($("loanRate").value),
-
-    tenure_months:
-      number($("loanTenure").value),
-
-    start_date:
-      $("loanStart").value,
-
-    interest_only_months:
-      number($("loanInterestOnly").value),
-
-    updated_at:
-      new Date().toISOString()
-  };
-
-  const result =
-    await db
-      .from("loans")
-      .update(values)
-      .eq("id", loan.id)
-      .select()
-      .single();
-
-  if (result.error) {
-    toast(
-      result.error.message,
-      "error"
-    );
-    return;
-  }
-
-  closeModal();
-
-  toast(
-    "Loan settings updated.",
-    "success"
-  );
-
-  await load();
-}
-
-
-/* =========================================================
-   BORROWERS
-   ========================================================= */
-
-function people() {
-  const el = $("people");
-
-  if (!el) return;
-
-  el.innerHTML = `
-    <div class="card">
-
-      <div class="pt">
-
-        <div>
-          <h2>People</h2>
-          <div class="muted">
-            Fixed EMI contributions
-          </div>
-        </div>
-
-        ${
-          isOwner()
-            ? `
-              <button
-                class="btn soft"
-                onclick="person()">
-                ＋ Add
-              </button>
-            `
-            : ""
-        }
-
-      </div>
-
-      ${
-        borrowers.length
-          ? borrowers.map(personRow).join("")
-          : `
-            <div class="empty">
-              No people added yet.
-            </div>
-          `
-      }
-
-    </div>
-  `;
-}
-
-
-function personRow(person) {
-  const rows =
-    paymentsData.filter(
-      p => p.borrower_id === person.id
-    );
-
-  const emi =
-    rows.reduce(
-      (sum, row) =>
-        sum + number(row.emi_paid),
-      0
-    );
-
-  const extra =
-    rows.reduce(
-      (sum, row) =>
-        sum + number(row.extra_principal),
-      0
-    );
-
-  const total =
-    emi + extra;
-
-  const percent =
-    number(loan.total_amount) > 0
-      ? total /
-        number(loan.total_amount) *
-        100
-      : 0;
-
-  return `
-    <div class="row">
-
-      <div>
-        <b>${esc(person.name)}</b>
-
-        <div class="muted">
-          Fixed EMI:
-          ${money(person.scheduled_emi)}
-        </div>
-
-        <div class="muted">
-          Contribution:
-          ${money(total)}
-          · ${percent.toFixed(2)}%
-        </div>
-      </div>
-
-      ${
-        isOwner()
-          ? `
-            <button
-              class="btn soft"
-              onclick="person('${person.id}')">
-              Edit
-            </button>
-          `
-          : ""
-      }
-
-    </div>
-  `;
-}
-
-
-function person(id) {
-  if (!isOwner()) {
-    accountPopup();
-    return;
-  }
-
-  const personData =
-    borrowers.find(
-      x => x.id === id
-    ) || {
-      name: "",
-      scheduled_emi: 0
-    };
-
-  openModal(`
-    <h2>
-      ${id ? "Edit" : "Add"} Person
-    </h2>
-
-    <label>
-      Name
-      <input id="personName"
-             value="${esc(personData.name)}"
-             placeholder="Person name">
-    </label>
-
-    <label>
-      Fixed monthly EMI
-      <input id="personEMI"
-             type="number"
-             value="${number(personData.scheduled_emi)}">
-    </label>
-
-    <p class="muted">
-      This EMI is automatically used for every month.
-      You do not need to enter the fixed EMI again.
-    </p>
-
-    <button
-      class="btn primary"
-      onclick="savePerson('${id || ""}')">
-      Save Person
-    </button>
-
-    ${
-      id
-        ? `
-          <button
-            class="btn danger"
-            onclick="deletePerson('${id}')">
-            Delete Person
-          </button>
-        `
-        : ""
-    }
-  `);
-}
-
-
-async function savePerson(id) {
-  if (!isOwner()) return;
-
-  const values = {
-    loan_id: loan.id,
-
-    name:
-      $("personName").value.trim() ||
-      "Person",
-
-    scheduled_emi:
-      number($("personEMI").value),
-
-    /*
-      Keep the old column harmlessly at zero.
-      New app does not use it.
-    */
-    share_amount: 0,
-
-    sort_order: id
-      ? (
-          borrowers.find(
-            x => x.id === id
-          )?.sort_order || 0
-        )
-      : borrowers.length
-  };
-
-  let result;
-
-  if (id) {
-    result =
-      await db
-        .from("borrowers")
-        .update(values)
-        .eq("id", id)
-        .select()
-        .single();
-  } else {
-    result =
-      await db
-        .from("borrowers")
-        .insert(values)
-        .select()
-        .single();
-  }
-
-  if (result.error) {
-    toast(
-      result.error.message,
-      "error"
-    );
-    return;
-  }
-
-  closeModal();
-
-  toast(
-    id
-      ? "Person updated."
-      : "Person added.",
-    "success"
-  );
-
-  await load();
-}
-
-
-async function deletePerson(id) {
-  if (!isOwner()) return;
-
-  openModal(`
-    <h2>Delete person?</h2>
-
-    <p class="muted">
-      This will delete this person's payment records too.
-    </p>
-
-    <button
-      class="btn danger"
-      onclick="confirmDeletePerson('${id}')">
-      Delete
-    </button>
-
-    <button
-      class="btn soft"
-      onclick="closeModal()">
-      Cancel
-    </button>
-  `);
-}
-
-
-async function confirmDeletePerson(id) {
-  if (!isOwner()) return;
-
-  const result =
-    await db
-      .from("borrowers")
-      .delete()
-      .eq("id", id);
-
-  if (result.error) {
-    toast(
-      result.error.message,
-      "error"
-    );
-    return;
-  }
-
-  closeModal();
-
-  toast(
-    "Person deleted.",
-    "success"
-  );
-
-  await load();
-}
-
-
-/* =========================================================
-   PAYMENT ENTRY
-   ========================================================= */
-
-function payment(monthNumber = null) {
-  if (!isOwner()) {
-    accountPopup();
-    return;
-  }
-
-  const m =
-    monthNumber ||
-    findNextPaymentMonth();
-
-  if (
-    !m ||
-    m < 1 ||
-    m > number(loan.tenure_months)
-  ) {
-    toast(
-      "No available loan month.",
-      "error"
-    );
-    return;
-  }
-
-  paymentPopup(m);
-}
-
-
-function findNextPaymentMonth() {
-  for (
-    let m = 1;
-    m <= number(loan.tenure_months);
-    m++
-  ) {
-    const exists =
-      borrowers.some(
-        b =>
-          getPayment(m, b.id)
-      );
-
-    if (!exists) return m;
-  }
-
-  return number(loan.tenure_months);
-}
-
-
-function paymentPopup(monthNo) {
-  const existing =
-    paymentsData.filter(
-      x =>
-        number(x.month_no) ===
-        number(monthNo)
-    );
-
-  const previous =
-    calculateLoan()
-      .months
-      .find(
-        x => x.month === monthNo
-      );
-
-  openModal(`
-    <h2>
-      ${esc(monthName(monthNo))}
-    </h2>
-
-    <p class="muted">
-      Fixed EMI is automatically included.
-      Enter only the <b>extra principal</b>
-      paid by each person.
-    </p>
-
-    <div class="payment-info">
-
-      <div>
-        <small>Opening principal</small>
-        <b>
-          ${money(previous?.opening || 0)}
-        </b>
-      </div>
-
-      <div>
-        <small>Interest for month</small>
-        <b>
-          ${money(previous?.interest || 0)}
-        </b>
-      </div>
-
-      <div>
-        <small>Fixed EMI total</small>
-        <b>
-          ${money(fixedEMITotal())}
-        </b>
-      </div>
-
-    </div>
-
-    <div id="paymentPeople"></div>
-
-    <button
-      class="btn primary"
-      onclick="saveMonthPayment(${monthNo})">
-      ✓ Pay & Save
-    </button>
-
-    ${
-      existing.length
-        ? `
-          <button
-            class="btn soft"
-            onclick="deleteMonthPayments(${monthNo})">
-            Delete this month's payment
-          </button>
-        `
-        : ""
-    }
-  `);
-
-  const container =
-    $("paymentPeople");
-
-  if (!container) return;
-
-  container.innerHTML =
-    borrowers
-      .map(person => {
-        const old =
-          getPayment(
-            monthNo,
-            person.id
-          );
-
-        return `
-          <div class="pay">
-
-            <div class="pt">
-
-              <b>
-                ${esc(person.name)}
-              </b>
-
-              <span class="pill">
-                EMI ${money(
-                  person.scheduled_emi
-                )}
-              </span>
-
-            </div>
-
-            <label>
-              Extra principal paid
-              <input
-                id="extra_${person.id}"
-                type="number"
-                min="0"
-                step="1"
-                value="${
-                  old
-                    ? number(
-                        old.extra_principal
-                      )
-                    : ""
-                }"
-                placeholder="₹ 0">
-            </label>
-
-            <div class="calc">
-              Fixed EMI:
-              <b>
-                ${money(person.scheduled_emi)}
-              </b>
-
-              <br>
-
-              ${
-                old
-                  ? "Existing payment — edit the extra amount and save."
-                  : "Only enter extra payment if this person paid extra."
-              }
-            </div>
-
-          </div>
-        `;
-      })
-      .join("");
-}
-
-
-async function saveMonthPayment(monthNo) {
-  if (!isOwner()) return;
-
-  if (!borrowers.length) {
-    toast(
-      "Add at least one person first.",
-      "error"
-    );
-    return;
-  }
-
-  for (const person of borrowers) {
-    const field =
-      $(`extra_${person.id}`);
-
-    const extra =
-      number(field?.value);
-
-    const old =
-      getPayment(
-        monthNo,
-        person.id
-      );
-
-    /*
-      Fixed EMI is automatically stored.
-      User never needs to re-enter it.
-    */
-    const values = {
-      loan_id: loan.id,
-
-      borrower_id:
-        person.id,
-
-      month_no:
-        monthNo,
-
-      payment_date:
-        new Date()
-          .toISOString()
-          .slice(0, 10),
-
-      emi_paid:
-        number(person.scheduled_emi),
-
-      extra_principal:
-        Math.max(0, extra)
-    };
-
-    let result;
-
-    if (old) {
-      result =
-        await db
-          .from("monthly_payments")
-          .update(values)
-          .eq("id", old.id);
-    } else {
-      result =
-        await db
-          .from("monthly_payments")
-          .insert(values);
-    }
-
-    if (result.error) {
-      toast(
-        result.error.message,
-        "error"
-      );
-      return;
-    }
-  }
-
-  closeModal();
-
-  toast(
-    `${monthName(monthNo)} payment saved.`,
-    "success"
-  );
-
-  await load();
-}
-
-
-/* =========================================================
-   DELETE MONTH
-   ========================================================= */
-
-async function deleteMonthPayments(monthNo) {
-  if (!isOwner()) return;
-
-  openModal(`
-    <h2>Delete ${esc(monthName(monthNo))}?</h2>
-
-    <p class="muted">
-      All payment entries for this month will be deleted.
-    </p>
-
-    <button
-      class="btn danger"
-      onclick="confirmDeleteMonth(${monthNo})">
-      Delete
-    </button>
-
-    <button
-      class="btn soft"
-      onclick="closeModal()">
-      Cancel
-    </button>
-  `);
-}
-
-
-async function confirmDeleteMonth(monthNo) {
-  if (!isOwner()) return;
-
-  const result =
-    await db
-      .from("monthly_payments")
-      .delete()
-      .eq("loan_id", loan.id)
-      .eq("month_no", monthNo);
-
-  if (result.error) {
-    toast(
-      result.error.message,
-      "error"
-    );
-    return;
-  }
-
-  closeModal();
-
-  toast(
-    `${monthName(monthNo)} deleted.`,
-    "success"
-  );
-
-  await load();
-}
-
-
-/* =========================================================
-   PAYMENTS PAGE
+   PAYMENTS
    ========================================================= */
 
 function payments() {
-  const el = $("payments");
 
-  if (!el) return;
-
-  if (!loan) {
-    el.innerHTML = `
-      <div class="card">
-        <div class="empty">
-          No loan available.
-        </div>
-      </div>
-    `;
-
-    return;
-  }
+  if (!$("payments")) return;
 
   const months =
-    [...new Set(
-      paymentsData.map(
-        x => number(x.month_no)
+    [
+      ...new Set(
+        ps.map(
+          p => Number(p.month_no)
+        )
       )
-    )].sort(
-      (a, b) => b - a
-    );
+    ].sort((a, b) => b - a);
 
-  el.innerHTML = `
+  $("payments").innerHTML = `
+
     <div class="card">
 
       <div class="pt">
@@ -2166,13 +838,13 @@ function payments() {
           <h2>Payments</h2>
 
           <div class="muted">
-            Enter extra payment only.
-            Fixed EMI is automatic.
+            ${months.length}
+            month(s) recorded
           </div>
         </div>
 
         ${
-          isOwner()
+          edit()
             ? `
               <button
                 class="btn primary"
@@ -2187,15 +859,79 @@ function payments() {
 
       ${
         months.length
-          ? months
-              .map(
-                m =>
-                  renderPaymentMonth(m)
-              )
-              .join("")
+          ? months.map(monthNo => {
+
+              const rows =
+                ps.filter(
+                  p =>
+                    Number(p.month_no) ===
+                    Number(monthNo)
+                );
+
+              const emiTotal =
+                rows.reduce(
+                  (s, p) =>
+                    s +
+                    (Number(p.emi_paid) || 0),
+                  0
+                );
+
+              const extraTotal =
+                rows.reduce(
+                  (s, p) =>
+                    s +
+                    (Number(p.extra_principal) || 0),
+                  0
+                );
+
+              const result =
+                calculateLoan(monthNo);
+
+              return `
+                <div
+                  class="row"
+                  style="cursor:pointer"
+                  onclick="editMonth(${monthNo})">
+
+                  <div>
+
+                    <b>
+                      ${monthLabel(monthNo)}
+                    </b>
+
+                    <div class="muted">
+                      EMI ${M(emiTotal)}
+                      · Extra ${M(extraTotal)}
+                    </div>
+
+                  </div>
+
+                  <div style="text-align:right">
+
+                    <span class="pill">
+                      Balance
+                      ${M(result.balance)}
+                    </span>
+
+                    ${
+                      edit()
+                        ? `
+                          <div class="muted">
+                            ✏️ Edit
+                          </div>
+                        `
+                        : ""
+                    }
+
+                  </div>
+
+                </div>
+              `;
+
+            }).join("")
           : `
             <div class="empty">
-              No monthly payments recorded yet.
+              No payments recorded yet.
             </div>
           `
       }
@@ -2204,172 +940,82 @@ function payments() {
   `;
 }
 
+/* =========================================================
+   PEOPLE
+   ========================================================= */
 
-function renderPaymentMonth(monthNo) {
-  const rows =
-    paymentsData.filter(
-      x =>
-        number(x.month_no) ===
-        monthNo
-    );
+function people() {
 
-  const extra =
-    rows.reduce(
-      (sum, x) =>
-        sum + number(x.extra_principal),
-      0
-    );
+  if (!$("people")) return;
 
-  const emi =
-    rows.reduce(
-      (sum, x) =>
-        sum + number(x.emi_paid),
-      0
-    );
+  $("people").innerHTML = `
 
-  const calc =
-    calculateLoan()
-      .months
-      .find(
-        x => x.month === monthNo
-      );
+    <div class="card">
 
-  return `
-    <div class="row">
+      <div class="pt">
 
-      <div>
-        <b>
-          ${esc(monthName(monthNo))}
-        </b>
-
-        <div class="muted">
-          EMI ${money(emi)}
-          · Extra ${money(extra)}
-        </div>
+        <h2>People</h2>
 
         ${
-          calc
+          edit()
             ? `
-              <div class="muted">
-                Principal:
-                ${money(calc.principal)}
-                · Interest:
-                ${money(calc.interest)}
-                · Balance:
-                ${money(calc.closing)}
-              </div>
+              <button
+                class="btn soft"
+                onclick="person()">
+                ＋ Add
+              </button>
             `
             : ""
         }
+
       </div>
 
       ${
-        isOwner()
-          ? `
-            <button
-              class="btn soft"
-              onclick="payment(${monthNo})">
-              ✏️ Edit
-            </button>
-          `
-          : ""
-      }
+        bs.length
+          ? bs.map(b => {
 
-    </div>
-  `;
-}
+              const s =
+                personStats(b.id);
 
+              return `
+                <div class="row">
 
-/* =========================================================
-   REPORTS
-   ========================================================= */
+                  <div>
 
-function reports() {
-  const el = $("reports");
+                    <b>
+                      ${esc(b.name)}
+                    </b>
 
-  if (!el) return;
+                    <div class="muted">
+                      Fixed EMI:
+                      ${M(b.scheduled_emi)}
+                    </div>
 
-  if (!loan) {
-    el.innerHTML = `
-      <div class="card">
-        <div class="empty">
-          No loan available.
-        </div>
-      </div>
-    `;
+                    <div class="muted">
+                      Total paid:
+                      ${M(s.totalPaid)}
+                    </div>
 
-    return;
-  }
+                  </div>
 
-  const data =
-    calculateLoan();
+                  ${
+                    edit()
+                      ? `
+                        <button
+                          class="btn soft"
+                          onclick="
+                            person('${b.id}')
+                          ">
+                          Edit
+                        </button>
+                      `
+                      : ""
+                  }
 
-  const original =
-    number(loan.total_amount);
+                </div>
+              `;
 
-  const percent =
-    original > 0
-      ? data.principalPaid /
-        original *
-        100
-      : 0;
-
-  el.innerHTML = `
-    <div class="card">
-
-      <h2>Loan Report</h2>
-
-      <div class="row">
-        <span>Original loan</span>
-        <b>${money(original)}</b>
-      </div>
-
-      <div class="row">
-        <span>Principal paid</span>
-        <b>${money(data.principalPaid)}</b>
-      </div>
-
-      <div class="row">
-        <span>Remaining principal</span>
-        <b>${money(data.remaining)}</b>
-      </div>
-
-      <div class="row">
-        <span>Interest paid</span>
-        <b>${money(data.interestPaid)}</b>
-      </div>
-
-      <div class="row">
-        <span>Total paid</span>
-        <b>${money(data.totalPaid)}</b>
-      </div>
-
-      <div class="row">
-        <span>Extra principal</span>
-        <b>${money(data.extraPaid)}</b>
-      </div>
-
-      <div class="row">
-        <span>Interest saved</span>
-        <b>${money(data.interestSaved)}</b>
-      </div>
-
-      <div class="row">
-        <span>Loan paid</span>
-        <b>${percent.toFixed(2)}%</b>
-      </div>
-
-    </div>
-
-    <div class="card">
-
-      <h2>Person-wise contribution</h2>
-
-      ${
-        borrowers.length
-          ? borrowers
-              .map(reportPerson)
-              .join("")
+            }).join("")
           : `
             <div class="empty">
               No people added.
@@ -2378,160 +1024,219 @@ function reports() {
       }
 
     </div>
+  `;
+}
+
+/* =========================================================
+   REPORTS
+   ========================================================= */
+
+function reports() {
+
+  if (!$("reports")) return;
+
+  if (!loan) {
+    $("reports").innerHTML = `
+      <div class="card">
+        <div class="empty">
+          No loan available.
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  const result =
+    calculateLoan(
+      Number(loan.tenure_months)
+    );
+
+  const original =
+    Number(loan.total_amount) || 0;
+
+  const paid =
+    result.principalPaid;
+
+  const remaining =
+    Math.max(
+      0,
+      original - paid
+    );
+
+  const percent =
+    original > 0
+      ? Math.min(
+          100,
+          paid / original * 100
+        )
+      : 0;
+
+  $("reports").innerHTML = `
 
     <div class="card">
 
-      <h2>Monthly schedule</h2>
+      <h2>Loan Report</h2>
 
-      <div class="table">
-        <table>
-
-          <tr>
-            <th>Month</th>
-            <th>Interest</th>
-            <th>Principal</th>
-            <th>Extra</th>
-            <th>Balance</th>
-          </tr>
-
-          ${
-            data.months
-              .filter(
-                x =>
-                  x.opening > 0 ||
-                  x.total > 0
-              )
-              .map(
-                x => `
-                  <tr>
-                    <td>
-                      ${esc(x.name)}
-                    </td>
-                    <td>
-                      ${money(x.interest)}
-                    </td>
-                    <td>
-                      ${money(x.principal)}
-                    </td>
-                    <td>
-                      ${money(x.extra)}
-                    </td>
-                    <td>
-                      ${money(x.closing)}
-                    </td>
-                  </tr>
-                `
-              )
-              .join("")
-          }
-
-        </table>
+      <div class="row">
+        <span>Original loan</span>
+        <b>${M(original)}</b>
       </div>
+
+      <div class="row">
+        <span>Principal paid</span>
+        <b>${M(paid)}</b>
+      </div>
+
+      <div class="row">
+        <span>Remaining principal</span>
+        <b>${M(remaining)}</b>
+      </div>
+
+      <div class="row">
+        <span>Loan paid</span>
+        <b>${percent.toFixed(2)}%</b>
+      </div>
+
+      <div class="row">
+        <span>Interest paid</span>
+        <b>${M(result.interestPaid)}</b>
+      </div>
+
+      <div class="row">
+        <span>Extra principal</span>
+        <b>${M(result.extraPaid)}</b>
+      </div>
+
+      <div class="row">
+        <span>Total money paid</span>
+        <b>${M(result.totalPaid)}</b>
+      </div>
+
+      ${
+        result.unpaidInterest > 0
+          ? `
+            <div class="row">
+              <span>Unpaid interest</span>
+              <b>
+                ${M(result.unpaidInterest)}
+              </b>
+            </div>
+          `
+          : ""
+      }
+
+    </div>
+
+    <div class="card">
+
+      <h2>Person Contributions</h2>
+
+      ${
+        bs.map(b => {
+
+          const s =
+            personStats(b.id);
+
+          const percentage =
+            result.totalPaid > 0
+              ? (
+                  s.totalPaid /
+                  result.totalPaid
+                ) * 100
+              : 0;
+
+          return `
+            <div class="person">
+
+              <div class="pt">
+                <b>${esc(b.name)}</b>
+
+                <span class="pill">
+                  ${percentage.toFixed(2)}%
+                </span>
+              </div>
+
+              <div class="row">
+                <span>Fixed EMI</span>
+                <b>
+                  ${M(b.scheduled_emi)}
+                </b>
+              </div>
+
+              <div class="row">
+                <span>EMI paid</span>
+                <b>
+                  ${M(s.emiPaid)}
+                </b>
+              </div>
+
+              <div class="row">
+                <span>Extra paid</span>
+                <b>
+                  ${M(s.extraPaid)}
+                </b>
+              </div>
+
+              <div class="row">
+                <span>Total contribution</span>
+                <b>
+                  ${M(s.totalPaid)}
+                </b>
+              </div>
+
+            </div>
+          `;
+
+        }).join("")
+      }
 
     </div>
   `;
 }
-
-
-function reportPerson(person) {
-  const rows =
-    paymentsData.filter(
-      x => x.borrower_id === person.id
-    );
-
-  const emi =
-    rows.reduce(
-      (s, x) =>
-        s + number(x.emi_paid),
-      0
-    );
-
-  const extra =
-    rows.reduce(
-      (s, x) =>
-        s + number(x.extra_principal),
-      0
-    );
-
-  const total =
-    emi + extra;
-
-  const percentage =
-    number(loan.total_amount) > 0
-      ? total /
-        number(loan.total_amount) *
-        100
-      : 0;
-
-  return `
-    <div class="row">
-
-      <div>
-        <b>${esc(person.name)}</b>
-
-        <div class="muted">
-          EMI paid:
-          ${money(emi)}
-        </div>
-
-        <div class="muted">
-          Extra:
-          ${money(extra)}
-        </div>
-      </div>
-
-      <div style="text-align:right">
-        <b>${money(total)}</b>
-        <div class="muted">
-          ${percentage.toFixed(2)}%
-        </div>
-      </div>
-
-    </div>
-  `;
-}
-
 
 /* =========================================================
-   MORE PAGE
+   MORE
    ========================================================= */
 
 function more() {
-  const el = $("more");
 
-  if (!el) return;
+  if (!$("more")) return;
 
-  el.innerHTML = `
+  $("more").innerHTML = `
+
     <div class="card">
 
       <h2>Account</h2>
 
+      <div class="muted">
+
+        ${
+          user
+            ? `
+              Signed in as
+              <b>${esc(user.email)}</b>
+            `
+            : `
+              Public view mode.
+              Only the owner can edit.
+            `
+        }
+
+      </div>
+
       ${
         user
           ? `
-            <div class="account-status">
-              <span class="status-dot"></span>
-              Owner signed in
-            </div>
-
-            <div class="muted">
-              ${esc(user.email)}
-            </div>
-
             <button
-              class="btn danger"
-              onclick="signOut()">
-              Sign out
+              class="btn soft"
+              onclick="accountPopup()">
+              Account
             </button>
           `
           : `
-            <div class="muted">
-              Public view mode.
-              Editing is available only to the owner.
-            </div>
-
             <p class="muted">
-              Use the 👤 icon at the top for owner sign-in.
+              Use the person icon in the
+              top-right corner to sign in.
             </p>
           `
       }
@@ -2539,13 +1244,14 @@ function more() {
     </div>
 
     ${
-      isOwner()
+      edit()
         ? `
           <div class="card">
 
-            <h2>Manage Loan</h2>
+            <h2>Manage</h2>
 
             <div class="row">
+
               <b>Loan settings</b>
 
               <button
@@ -2553,154 +1259,1389 @@ function more() {
                 onclick="loanEdit()">
                 Open
               </button>
+
             </div>
 
             <div class="row">
+
+              <b>Payment history</b>
+
+              <button
+                class="btn soft"
+                onclick="history()">
+                Open
+              </button>
+
+            </div>
+
+            <div class="row">
+
               <b>Reset loan</b>
 
               <button
                 class="btn danger"
-                onclick="confirmLoanReset()">
+                onclick="resetLoan()">
                 Reset
               </button>
+
             </div>
 
           </div>
         `
         : ""
     }
-
-    <div class="card">
-
-      <h2>Cloud</h2>
-
-      <div class="row">
-
-        <span>Status</span>
-
-        <b>
-          ${
-            READY
-              ? "Connected"
-              : "Not configured"
-          }
-        </b>
-
-      </div>
-
-      <p class="muted">
-        Dream Home stores loan data in Supabase
-        so the same information can be viewed
-        from other devices.
-      </p>
-
-    </div>
   `;
 }
 
-
 /* =========================================================
-   LOAN RESET
+   MODAL
    ========================================================= */
 
-function confirmLoanReset() {
-  if (!isOwner()) {
+function modal(html) {
+
+  if (!$("modal")) return;
+
+  $("mb").innerHTML = html;
+
+  $("modal").classList.add("open");
+}
+
+function close() {
+
+  if (!$("modal")) return;
+
+  $("modal").classList.remove("open");
+}
+
+if ($("x")) {
+  $("x").onclick = close;
+}
+
+if ($("modal")) {
+
+  $("modal").onclick = e => {
+
+    if (e.target === $("modal")) {
+      close();
+    }
+
+  };
+}
+
+/* =========================================================
+   OWNER ACCOUNT POPUP
+   ========================================================= */
+
+function accountPopup() {
+
+  if (!user) {
+    auth();
+    return;
+  }
+
+  modal(`
+
+    <div class="account-popup">
+
+      <div class="popup-icon">
+        👤
+      </div>
+
+      <h2>Owner Account</h2>
+
+      <p class="muted">
+        ${esc(user.email)}
+      </p>
+
+      <div class="card mini">
+
+        <div class="row">
+          <span>Status</span>
+          <b>Owner</b>
+        </div>
+
+        <div class="row">
+          <span>Access</span>
+          <b>Edit enabled</b>
+        </div>
+
+      </div>
+
+      <button
+        class="btn danger"
+        onclick="out()">
+        Sign out
+      </button>
+
+    </div>
+  `);
+}
+
+/* =========================================================
+   AUTH
+   ========================================================= */
+
+function auth() {
+
+  if (user) {
     accountPopup();
     return;
   }
 
-  openModal(`
-    <h2>Reset entire loan?</h2>
+  modal(`
 
-    <p class="muted">
-      This is a complete reset.
-      All people and monthly payment records
-      will be removed.
-    </p>
+    <div class="account-popup">
 
-    <p>
-      <b>This action cannot be undone.</b>
-    </p>
+      <div class="popup-icon">
+        🔐
+      </div>
 
-    <button
-      class="btn danger"
-      onclick="resetLoan()">
-      Yes, Reset Loan
-    </button>
+      <h2>Owner Sign In</h2>
 
-    <button
-      class="btn soft"
-      onclick="closeModal()">
-      Cancel
-    </button>
+      <p class="muted">
+        Public users can view the loan.
+        Only the owner can edit it.
+      </p>
+
+      <label>
+        Email
+        <input
+          id="ae"
+          type="email"
+          placeholder="Owner email"
+          autocomplete="email">
+      </label>
+
+      <label>
+        Password
+        <input
+          id="ap"
+          type="password"
+          placeholder="Password"
+          autocomplete="current-password">
+      </label>
+
+      <button
+        class="btn primary"
+        onclick="login()">
+        Sign in
+      </button>
+
+      <button
+        class="btn soft"
+        onclick="signup()">
+        Create owner account
+      </button>
+
+    </div>
   `);
 }
 
+/* =========================================================
+   LOGIN
+   ========================================================= */
 
-async function resetLoan() {
-  if (!isOwner()) return;
+async function login() {
 
-  /*
-    Delete payments first.
-  */
-  let result =
-    await db
-      .from("monthly_payments")
-      .delete()
-      .eq("loan_id", loan.id);
-
-  if (result.error) {
+  if (!db) {
     toast(
-      result.error.message,
+      "Cloud is not configured.",
       "error"
     );
     return;
   }
 
-  /*
-    Delete borrowers.
-  */
-  result =
-    await db
-      .from("borrowers")
-      .delete()
-      .eq("loan_id", loan.id);
+  const email =
+    $("ae")?.value.trim();
 
-  if (result.error) {
+  const password =
+    $("ap")?.value;
+
+  if (!email || !password) {
     toast(
-      result.error.message,
+      "Enter email and password.",
       "error"
     );
     return;
   }
 
-  /*
-    Delete loan.
-  */
-  result =
-    await db
-      .from("loans")
-      .delete()
-      .eq("id", loan.id);
+  const q =
+    await db.auth.signInWithPassword({
+      email,
+      password
+    });
 
-  if (result.error) {
+  if (q.error) {
+
     toast(
-      result.error.message,
+      q.error.message,
       "error"
     );
+
     return;
   }
 
-  closeModal();
+  close();
+
+  user = q.data.user;
 
   toast(
-    "Loan has been reset.",
+    "✓ Signed in successfully",
     "success"
   );
 
   await load();
 }
 
+/* =========================================================
+   SIGN UP
+   ========================================================= */
+
+async function signup() {
+
+  if (!db) {
+    toast(
+      "Cloud is not configured.",
+      "error"
+    );
+    return;
+  }
+
+  const email =
+    $("ae")?.value.trim();
+
+  const password =
+    $("ap")?.value;
+
+  if (!email || !password) {
+    toast(
+      "Enter email and password first.",
+      "error"
+    );
+    return;
+  }
+
+  if (password.length < 6) {
+    toast(
+      "Password must be at least 6 characters.",
+      "error"
+    );
+    return;
+  }
+
+  const q =
+    await db.auth.signUp({
+      email,
+      password
+    });
+
+  if (q.error) {
+
+    toast(
+      q.error.message,
+      "error"
+    );
+
+    return;
+  }
+
+  close();
+
+  if (q.data?.session) {
+
+    user = q.data.user;
+
+    toast(
+      "✓ Owner account created",
+      "success"
+    );
+
+    await load();
+
+  } else {
+
+    toast(
+      "✓ Account created. Check your email.",
+      "success"
+    );
+
+  }
+}
+
+/* =========================================================
+   SIGN OUT
+   ========================================================= */
+
+async function out() {
+
+  if (!db) return;
+
+  const q =
+    await db.auth.signOut();
+
+  if (q.error) {
+
+    toast(
+      q.error.message,
+      "error"
+    );
+
+    return;
+  }
+
+  close();
+
+  user = null;
+
+  toast(
+    "✓ Signed out",
+    "success"
+  );
+
+  await load();
+}
+
+/* =========================================================
+   CREATE LOAN
+   ========================================================= */
+
+function loanCreate() {
+
+  if (!user) {
+    auth();
+    return;
+  }
+
+  modal(`
+
+    <h2>Create Dream Home Loan</h2>
+
+    <div class="grid">
+
+      <label class="full">
+        Loan name
+
+        <input
+          id="cln"
+          value="Dream Home Loan">
+      </label>
+
+      <label>
+        Overall loan amount
+
+        <input
+          id="cla"
+          type="number"
+          value="4500000">
+      </label>
+
+      <label>
+        Annual interest %
+
+        <input
+          id="clr"
+          type="number"
+          step="0.01"
+          value="8.9">
+      </label>
+
+      <label>
+        Tenure months
+
+        <input
+          id="clt"
+          type="number"
+          value="240">
+      </label>
+
+      <label>
+        Start date
+
+        <input
+          id="cls"
+          type="date"
+          value="${
+            new Date()
+              .toISOString()
+              .slice(0, 10)
+          }">
+      </label>
+
+      <label>
+        Interest-only months
+
+        <input
+          id="cli"
+          type="number"
+          min="0"
+          value="0">
+      </label>
+
+      <label>
+        EMI mode
+
+        <select id="clm">
+
+          <option value="auto">
+            Auto
+          </option>
+
+          <option value="manual">
+            Manual
+          </option>
+
+        </select>
+
+      </label>
+
+      <label>
+        Manual EMI
+
+        <input
+          id="cle"
+          type="number"
+          value="">
+      </label>
+
+    </div>
+
+    <p class="muted">
+      Borrowers and their fixed EMI amounts
+      can be added after creating the loan.
+    </p>
+
+    <button
+      class="btn primary"
+      onclick="createLoan()">
+      Create Loan
+    </button>
+
+  `);
+}
+
+/* =========================================================
+   SAVE NEW LOAN
+   ========================================================= */
+
+async function createLoan() {
+
+  if (!edit() && !user) {
+    auth();
+    return;
+  }
+
+  const v = {
+
+    name:
+      $("cln").value.trim() ||
+      "Dream Home Loan",
+
+    total_amount:
+      Number($("cla").value) || 0,
+
+    annual_rate:
+      Number($("clr").value) || 0,
+
+    tenure_months:
+      Number($("clt").value) || 0,
+
+    start_date:
+      $("cls").value,
+
+    interest_only_months:
+      Number($("cli").value) || 0,
+
+    emi_mode:
+      $("clm").value,
+
+    manual_emi:
+      Number($("cle").value) || 0,
+
+    created_by:
+      user.id
+
+  };
+
+  if (v.total_amount <= 0) {
+    toast(
+      "Enter a valid loan amount.",
+      "error"
+    );
+    return;
+  }
+
+  const q =
+    await db
+      .from("loans")
+      .insert(v)
+      .select()
+      .single();
+
+  if (q.error) {
+
+    toast(
+      q.error.message,
+      "error"
+    );
+
+    return;
+  }
+
+  close();
+
+  toast(
+    "✓ Loan created",
+    "success"
+  );
+
+  await load();
+}
+
+/* =========================================================
+   LOAN SETTINGS
+   ========================================================= */
+
+function loanEdit() {
+
+  if (!edit()) {
+    auth();
+    return;
+  }
+
+  modal(`
+
+    <h2>Loan Settings</h2>
+
+    <div class="grid">
+
+      <label class="full">
+        Loan name
+
+        <input
+          id="ln"
+          value="${esc(loan.name)}">
+      </label>
+
+      <label>
+        Overall loan amount
+
+        <input
+          id="la"
+          type="number"
+          value="${loan.total_amount}">
+      </label>
+
+      <label>
+        Annual interest %
+
+        <input
+          id="lr"
+          type="number"
+          step="0.01"
+          value="${loan.annual_rate}">
+      </label>
+
+      <label>
+        Tenure months
+
+        <input
+          id="lt"
+          type="number"
+          value="${loan.tenure_months}">
+      </label>
+
+      <label>
+        Start date
+
+        <input
+          id="ls"
+          type="date"
+          value="${loan.start_date || ""}">
+      </label>
+
+      <label>
+        Interest-only months
+
+        <input
+          id="li"
+          type="number"
+          min="0"
+          value="${loan.interest_only_months || 0}">
+      </label>
+
+      <label>
+        EMI mode
+
+        <select id="lm">
+
+          <option
+            value="auto"
+            ${
+              loan.emi_mode === "auto"
+                ? "selected"
+                : ""
+            }>
+            Auto
+          </option>
+
+          <option
+            value="manual"
+            ${
+              loan.emi_mode === "manual"
+                ? "selected"
+                : ""
+            }>
+            Manual
+          </option>
+
+        </select>
+
+      </label>
+
+      <label>
+        Manual EMI
+
+        <input
+          id="le"
+          type="number"
+          value="${loan.manual_emi || ""}">
+      </label>
+
+    </div>
+
+    <p class="muted">
+      Interest is calculated on the common
+      remaining loan principal.
+    </p>
+
+    <button
+      class="btn primary"
+      onclick="saveLoan()">
+      Save Changes
+    </button>
+
+  `);
+}
+
+/* =========================================================
+   SAVE LOAN
+   ========================================================= */
+
+async function saveLoan() {
+
+  if (!edit()) {
+    auth();
+    return;
+  }
+
+  const v = {
+
+    name:
+      $("ln").value.trim() ||
+      "Dream Home Loan",
+
+    total_amount:
+      Number($("la").value) || 0,
+
+    annual_rate:
+      Number($("lr").value) || 0,
+
+    tenure_months:
+      Number($("lt").value) || 0,
+
+    start_date:
+      $("ls").value,
+
+    interest_only_months:
+      Number($("li").value) || 0,
+
+    emi_mode:
+      $("lm").value,
+
+    manual_emi:
+      Number($("le").value) || 0,
+
+    updated_at:
+      new Date().toISOString()
+
+  };
+
+  const q =
+    await db
+      .from("loans")
+      .update(v)
+      .eq("id", loan.id)
+      .select()
+      .single();
+
+  if (q.error) {
+
+    toast(
+      q.error.message,
+      "error"
+    );
+
+    return;
+  }
+
+  close();
+
+  toast(
+    "✓ Loan settings saved",
+    "success"
+  );
+
+  await load();
+}
+
+/* =========================================================
+   PERSON
+   ========================================================= */
+
+function person(id) {
+
+  if (!edit()) {
+    auth();
+    return;
+  }
+
+  const b =
+    bs.find(x => x.id === id) || {
+      name: "",
+      scheduled_emi: 0
+    };
+
+  modal(`
+
+    <h2>
+      ${id ? "Edit" : "Add"} Person
+    </h2>
+
+    <label>
+      Name
+
+      <input
+        id="bn"
+        value="${esc(b.name)}"
+        placeholder="Person name">
+    </label>
+
+    <label>
+      Fixed Monthly EMI
+
+      <input
+        id="be"
+        type="number"
+        value="${b.scheduled_emi || ""}"
+        placeholder="Example: 15000">
+    </label>
+
+    <p class="muted">
+      This fixed EMI will automatically appear
+      when entering monthly payments.
+    </p>
+
+    <button
+      class="btn primary"
+      onclick="savePerson('${id || ""}')">
+      Save Person
+    </button>
+
+    ${
+      id
+        ? `
+          <button
+            class="btn danger"
+            onclick="delPerson('${id}')">
+            Delete Person
+          </button>
+        `
+        : ""
+    }
+
+  `);
+}
+
+/* =========================================================
+   SAVE PERSON
+   ========================================================= */
+
+async function savePerson(id) {
+
+  if (!edit()) {
+    auth();
+    return;
+  }
+
+  const v = {
+
+    loan_id: loan.id,
+
+    name:
+      $("bn").value.trim() ||
+      "Person",
+
+    scheduled_emi:
+      Number($("be").value) || 0,
+
+    sort_order:
+      id
+        ? (
+            bs.find(
+              x => x.id === id
+            )?.sort_order || 0
+          )
+        : bs.length
+
+  };
+
+  let q;
+
+  if (id) {
+
+    q =
+      await db
+        .from("borrowers")
+        .update(v)
+        .eq("id", id)
+        .select()
+        .single();
+
+  } else {
+
+    q =
+      await db
+        .from("borrowers")
+        .insert(v)
+        .select()
+        .single();
+
+  }
+
+  if (q.error) {
+
+    toast(
+      q.error.message,
+      "error"
+    );
+
+    return;
+  }
+
+  close();
+
+  toast(
+    "✓ Person saved",
+    "success"
+  );
+
+  await load();
+}
+
+/* =========================================================
+   DELETE PERSON
+   ========================================================= */
+
+async function delPerson(id) {
+
+  if (!edit()) return;
+
+  if (
+    !confirm(
+      "Delete this person and all their payments?"
+    )
+  ) {
+    return;
+  }
+
+  const q =
+    await db
+      .from("borrowers")
+      .delete()
+      .eq("id", id);
+
+  if (q.error) {
+
+    toast(
+      q.error.message,
+      "error"
+    );
+
+    return;
+  }
+
+  close();
+
+  toast(
+    "Person deleted",
+    "success"
+  );
+
+  await load();
+}
+
+/* =========================================================
+   PAYMENT ENTRY
+   ========================================================= */
+
+function payment(monthNo = null) {
+
+  if (!edit()) {
+    auth();
+    return;
+  }
+
+  if (!loan) return;
+
+  let m = monthNo;
+
+  if (!m) {
+
+    m =
+      Number(
+        prompt(
+          `Enter month number (1-${loan.tenure_months})`,
+          "1"
+        )
+      );
+
+  }
+
+  if (
+    !m ||
+    m < 1 ||
+    m > Number(loan.tenure_months)
+  ) {
+    return;
+  }
+
+  showPaymentModal(m);
+}
+
+/* =========================================================
+   PAYMENT MODAL
+   ========================================================= */
+
+function showPaymentModal(m) {
+
+  const existing =
+    ps.filter(
+      p =>
+        Number(p.month_no) ===
+        Number(m)
+    );
+
+  const opening =
+    calculateLoan(
+      Number(m) - 1
+    );
+
+  const interest =
+    opening.balance *
+    monthlyRate();
+
+  modal(`
+
+    <h2>
+      ${monthLabel(m)}
+    </h2>
+
+    <div class="card mini">
+
+      <div class="row">
+        <span>Opening principal</span>
+        <b>${M(opening.balance)}</b>
+      </div>
+
+      <div class="row">
+        <span>Interest for month</span>
+        <b>${M(interest)}</b>
+      </div>
+
+    </div>
+
+    <p class="muted">
+      Fixed EMI is automatically loaded.
+      Enter only the extra amount paid by
+      each person.
+    </p>
+
+    <div id="prs"></div>
+
+    <button
+      class="btn primary"
+      onclick="savePayment(${m})">
+      ✓ Save Payment
+    </button>
+
+  `);
+
+  const container = $("prs");
+
+  if (!container) return;
+
+  container.innerHTML = bs.map(b => {
+
+    const e =
+      getPayment(m, b.id);
+
+    return `
+
+      <div class="pay">
+
+        <div class="pt">
+
+          <b>
+            ${esc(b.name)}
+          </b>
+
+          <span class="pill">
+            Fixed EMI
+            ${M(b.scheduled_emi)}
+          </span>
+
+        </div>
+
+        <div class="grid">
+
+          <label>
+            EMI paid
+
+            <input
+              disabled
+              value="${Math.round(
+                Number(
+                  b.scheduled_emi
+                ) || 0
+              )}">
+          </label>
+
+          <label>
+            Extra payment
+
+            <input
+              id="x${b.id}"
+              type="number"
+              min="0"
+              value="${
+                Number(
+                  e.extra_principal
+                ) || ""
+              }"
+              placeholder="0">
+          </label>
+
+        </div>
+
+        <div class="muted">
+
+          ${
+            Number(m) <=
+            Number(
+              loan.interest_only_months
+            )
+              ? `
+                Interest-only month:
+                EMI does not reduce principal.
+              `
+              : `
+                EMI above interest reduces
+                the common principal.
+              `
+          }
+
+        </div>
+
+      </div>
+
+    `;
+
+  }).join("");
+}
+
+/* =========================================================
+   SAVE PAYMENT
+   ========================================================= */
+
+async function savePayment(m) {
+
+  if (!edit()) {
+    auth();
+    return;
+  }
+
+  /*
+    Before saving, calculate current month's
+    fixed EMI automatically.
+  */
+
+  for (const b of bs) {
+
+    const extra =
+      Number(
+        $("x" + b.id)?.value
+      ) || 0;
+
+    const fixedEMI =
+      Number(b.scheduled_emi) || 0;
+
+    const v = {
+
+      loan_id: loan.id,
+
+      borrower_id: b.id,
+
+      month_no: Number(m),
+
+      payment_date:
+        new Date()
+          .toISOString()
+          .slice(0, 10),
+
+      /*
+        Fixed EMI is automatically stored.
+      */
+
+      emi_paid: fixedEMI,
+
+      /*
+        Only extra payment is entered manually.
+      */
+
+      extra_principal: extra
+
+    };
+
+    const q =
+      await db
+        .from("monthly_payments")
+        .upsert(
+          v,
+          {
+            onConflict:
+              "loan_id,borrower_id,month_no"
+          }
+        );
+
+    if (q.error) {
+
+      toast(
+        q.error.message,
+        "error"
+      );
+
+      return;
+    }
+  }
+
+  close();
+
+  toast(
+    `✓ ${monthLabel(m)} payment saved`,
+    "success"
+  );
+
+  await load();
+}
+
+/* =========================================================
+   EDIT MONTH
+   ========================================================= */
+
+function editMonth(m) {
+
+  if (!edit()) {
+    return;
+  }
+
+  payment(m);
+}
+
+/* =========================================================
+   PAYMENT HISTORY
+   ========================================================= */
+
+function history() {
+
+  if (!loan) return;
+
+  let rows = "";
+
+  const sorted =
+    [...ps].sort(
+      (a, b) =>
+        Number(b.month_no) -
+        Number(a.month_no)
+    );
+
+  sorted.forEach(p => {
+
+    const b =
+      bs.find(
+        x => x.id === p.borrower_id
+      );
+
+    const result =
+      calculateLoan(
+        Number(p.month_no)
+      );
+
+    rows += `
+
+      <tr>
+
+        <td>
+          ${monthLabel(p.month_no)}
+        </td>
+
+        <td>
+          ${esc(
+            b?.name || "Unknown"
+          )}
+        </td>
+
+        <td>
+          ${M(p.emi_paid)}
+        </td>
+
+        <td>
+          ${M(p.extra_principal)}
+        </td>
+
+        <td>
+          ${M(result.balance)}
+        </td>
+
+        ${
+          edit()
+            ? `
+              <td>
+                <button
+                  class="btn soft"
+                  onclick="
+                    close();
+                    payment(${p.month_no});
+                  ">
+                  Edit
+                </button>
+              </td>
+            `
+            : ""
+        }
+
+      </tr>
+    `;
+  });
+
+  modal(`
+
+    <h2>Payment History</h2>
+
+    ${
+      rows
+        ? `
+          <div class="table">
+
+            <table>
+
+              <tr>
+                <th>Month</th>
+                <th>Person</th>
+                <th>EMI</th>
+                <th>Extra</th>
+                <th>Balance</th>
+                ${
+                  edit()
+                    ? "<th></th>"
+                    : ""
+                }
+              </tr>
+
+              ${rows}
+
+            </table>
+
+          </div>
+        `
+        : `
+          <div class="empty">
+            No payments saved.
+          </div>
+        `
+    }
+
+  `);
+}
+
+/* =========================================================
+   RESET LOAN
+   ========================================================= */
+
+async function resetLoan() {
+
+  if (!edit()) {
+    auth();
+    return;
+  }
+
+  const answer =
+    prompt(
+      "Type RESET to delete all payments and borrowers. The loan settings will remain."
+    );
+
+  if (answer !== "RESET") {
+    return;
+  }
+
+  /*
+    Delete payments first.
+  */
+
+  const p =
+    await db
+      .from("monthly_payments")
+      .delete()
+      .eq("loan_id", loan.id);
+
+  if (p.error) {
+
+    toast(
+      p.error.message,
+      "error"
+    );
+
+    return;
+  }
+
+  /*
+    Delete borrowers.
+  */
+
+  const b =
+    await db
+      .from("borrowers")
+      .delete()
+      .eq("loan_id", loan.id);
+
+  if (b.error) {
+
+    toast(
+      b.error.message,
+      "error"
+    );
+
+    return;
+  }
+
+  close();
+
+  toast(
+    "✓ Loan tracking data reset",
+    "success"
+  );
+
+  await load();
+}
 
 /* =========================================================
    AUTH STATE
@@ -2709,20 +2650,30 @@ async function resetLoan() {
 if (db) {
 
   db.auth.onAuthStateChange(
-    () => {
-      /*
-        Delay prevents Supabase auth events from
-        triggering nested auth calls.
-      */
+    (event, session) => {
+
       setTimeout(
-        () => load(),
+        async () => {
+
+          user =
+            session?.user || null;
+
+          await load();
+
+        },
         0
       );
+
     }
   );
 
-}
+  load();
 
+} else {
+
+  dashboard();
+
+}
 
 /* =========================================================
    SERVICE WORKER
@@ -2731,51 +2682,20 @@ if (db) {
 if (
   "serviceWorker" in navigator
 ) {
-  window.addEventListener(
-    "load",
-    () => {
-      navigator.serviceWorker
-        .register("./sw.js")
-        .catch(error => {
-          console.warn(
-            "Service worker registration failed:",
-            error
-          );
-        });
-    }
-  );
+
+  navigator.serviceWorker
+    .register("./sw.js")
+    .catch(err =>
+      console.log(
+        "Service worker:",
+        err
+      )
+    );
+
 }
 
-
 /* =========================================================
-   INITIAL START
+   INITIAL NAVIGATION
    ========================================================= */
 
-(async function startDreamHome() {
-
-  /*
-    Always render the UI first.
-    This prevents a blank Home page if cloud loading
-    encounters a problem.
-  */
-  dashboard();
-
-  /*
-    Make sure the account icon is available.
-  */
-  if ($("account")) {
-    $("account").onclick =
-      accountPopup;
-  }
-
-  /*
-    Open Dashboard.
-  */
-  nav("dashboard");
-
-  /*
-    Then load cloud data.
-  */
-  await load();
-
-})();
+nav("dashboard");
