@@ -2,15 +2,6 @@
    DREAM HOME v3
    Cloud synced loan tracker
    Public view + Owner-only editing
-
-   CHANGES IN THIS VERSION:
-   1. Dashboard shows Minimum EMI and Fixed EMI separately.
-   2. Removes "EMI Paid" and "New Tenure" dashboard cells.
-   3. Removes everything below Loan Settings on dashboard.
-   4. Payment month starts from the month AFTER loan start date.
-   5. Each person gets a separate colored card in People/Reports.
-   6. Minimum EMI = automatic loan EMI.
-      Fixed EMI = total of all persons' fixed EMIs.
    ========================================================= */
 
 const CFG = window.DREAM_HOME || {};
@@ -76,68 +67,98 @@ function edit() {
 
 
 /* =========================================================
-   INTEREST / EMI
+   EMI CALCULATION
    ========================================================= */
 
-function rate() {
-    return (+loan.annual_rate || 0) / 1200;
-}
-
-
 /*
-   Minimum EMI:
+   MINIMUM EMI
    Automatically calculated from:
-   Loan amount + interest rate + tenure
+   - Total loan amount
+   - Annual interest rate
+   - Loan tenure
+
+   This is NOT the fixed EMI.
 */
+
 function minimumEMI() {
+
     if (!loan) return 0;
 
-    const p = +loan.total_amount || 0;
-    const n = +loan.tenure_months || 0;
-    const r = rate();
+    const principal =
+        +loan.total_amount || 0;
 
-    if (!p || !n) return 0;
+    const months =
+        +loan.tenure_months || 0;
 
-    if (!r) return p / n;
+    const monthlyRate =
+        (+loan.annual_rate || 0) / 1200;
+
+    if (!principal || !months) {
+        return 0;
+    }
+
+    if (!monthlyRate) {
+        return principal / months;
+    }
 
     return (
-        p *
-        r *
-        Math.pow(1 + r, n) /
-        (Math.pow(1 + r, n) - 1)
+        principal *
+        monthlyRate *
+        Math.pow(1 + monthlyRate, months) /
+        (
+            Math.pow(1 + monthlyRate, months) - 1
+        )
     );
 }
 
 
 /*
-   Fixed EMI:
-   Sum of all persons' fixed EMI amounts.
+   FIXED EMI
+   Total of all persons' fixed EMI amounts.
 */
+
 function fixedEMI() {
+
     return bs.reduce(
-        (total, b) => total + (+b.scheduled_emi || 0),
+        (total, person) =>
+            total + (+person.scheduled_emi || 0),
         0
     );
 }
 
 
 /*
-   Keep old overall() compatibility.
+   Keep compatibility with previous code.
 */
+
 function overall() {
     return minimumEMI();
 }
 
 
 /* =========================================================
-   PAYMENT HELPERS
+   INTEREST
+   ========================================================= */
+
+function rate() {
+
+    return (
+        (+loan?.annual_rate || 0) /
+        1200
+    );
+}
+
+
+/* =========================================================
+   PAYMENT LOOKUP
    ========================================================= */
 
 function pay(monthNo, borrowerId) {
+
     return (
         ps.find(
             x =>
-                x.month_no === monthNo &&
+                +x.month_no === +monthNo &&
                 x.borrower_id === borrowerId
         ) || {
             emi_paid: 0,
@@ -148,18 +169,26 @@ function pay(monthNo, borrowerId) {
 
 
 /* =========================================================
-   EMI MONTH CALCULATIONS
+   EMI MONTHS
    ========================================================= */
 
 /*
-   If loan starts in August 2026,
-   first EMI month = September 2026.
+   Loan start date = August 2026
+   First EMI       = September 2026
+
+   Month number 1 therefore represents Sep-2026.
 */
 
 function firstEMIDate() {
-    if (!loan || !loan.start_date) return null;
 
-    const d = new Date(loan.start_date + "T00:00:00");
+    if (!loan || !loan.start_date) {
+        return null;
+    }
+
+    const d =
+        new Date(
+            loan.start_date + "T00:00:00"
+        );
 
     return new Date(
         d.getFullYear(),
@@ -170,42 +199,59 @@ function firstEMIDate() {
 
 
 function monthDate(monthNo) {
-    const first = firstEMIDate();
 
-    if (!first) return null;
+    const first =
+        firstEMIDate();
+
+    if (!first) {
+        return null;
+    }
 
     return new Date(
         first.getFullYear(),
-        first.getMonth() + (monthNo - 1),
+        first.getMonth() + (+monthNo - 1),
         1
     );
 }
 
 
 function monthLabel(monthNo) {
-    const d = monthDate(monthNo);
 
-    if (!d) return `Month ${monthNo}`;
+    const d =
+        monthDate(monthNo);
 
-    return d.toLocaleDateString("en-US", {
-        month: "short",
-        year: "numeric"
-    });
+    if (!d) {
+        return `Month ${monthNo}`;
+    }
+
+    return d.toLocaleDateString(
+        "en-US",
+        {
+            month: "short",
+            year: "numeric"
+        }
+    );
 }
 
 
-function monthOptions() {
-    if (!loan) return "";
+function monthOptions(selectedMonth = 1) {
+
+    if (!loan) {
+        return "";
+    }
+
+    const tenure =
+        +loan.tenure_months || 0;
 
     let html = "";
 
-    for (
-        let m = 1;
-        m <= (+loan.tenure_months || 0);
-        m++
-    ) {
+    for (let m = 1; m <= tenure; m++) {
+
         html += `
-            <option value="${m}">
+            <option
+                value="${m}"
+                ${+selectedMonth === m ? "selected" : ""}
+            >
                 ${monthLabel(m)}
             </option>
         `;
@@ -216,29 +262,32 @@ function monthOptions() {
 
 
 /* =========================================================
-   GLOBAL LOAN CALCULATION
+   LOAN CALCULATION
    ========================================================= */
 
 /*
-   Calculates the loan as ONE loan.
+   The loan is calculated as ONE complete loan.
 
-   Principal is NOT divided between persons.
+   There is NO principal-share calculation.
 
-   Regular fixed EMI:
-   - Total fixed EMI of all persons
-   - Interest calculated on full outstanding principal
+   Interest is calculated on the full outstanding
+   principal every month.
 
-   Extra principal:
-   - Goes directly against full outstanding principal
-   - Contribution remains linked to the person who paid it
+   Fixed EMI is automatically counted for each person
+   when that month's payment exists.
 
-   Interest is recalculated every month based on
-   the remaining full-loan principal.
+   Extra principal is contributed only by the person
+   who entered it.
+
+   Extra principal reduces the full loan principal.
 */
 
-function calculateLoan(upToMonth = loan?.tenure_months || 0) {
+function calculateLoan(
+    upToMonth = loan?.tenure_months || 0
+) {
 
     if (!loan) {
+
         return {
             balance: 0,
             interestPaid: 0,
@@ -250,7 +299,9 @@ function calculateLoan(upToMonth = loan?.tenure_months || 0) {
         };
     }
 
-    let balance = +loan.total_amount || 0;
+    let balance =
+        +loan.total_amount || 0;
+
     let interestPaid = 0;
     let principalPaid = 0;
     let extraPaid = 0;
@@ -258,65 +309,69 @@ function calculateLoan(upToMonth = loan?.tenure_months || 0) {
     let unpaidInterest = 0;
     let monthsPaid = 0;
 
-    const r = rate();
+    const monthlyRate =
+        rate();
 
-    const interestOnly =
+    const interestOnlyMonths =
         +loan.interest_only_months || 0;
 
     for (
         let m = 1;
-        m <= upToMonth;
+        m <= +upToMonth;
         m++
     ) {
 
-        const records = ps.filter(
-            x => x.month_no === m
-        );
+        const records =
+            ps.filter(
+                x => +x.month_no === m
+            );
 
-        /*
-           A month is considered paid only when
-           there is at least one payment record.
-        */
-        if (!records.length) continue;
+        if (!records.length) {
+            continue;
+        }
 
         monthsPaid++;
 
-        const interest = balance * r;
+        const interest =
+            balance * monthlyRate;
 
         let regularPaid = 0;
         let monthExtra = 0;
 
-        records.forEach(x => {
+        records.forEach(record => {
 
-            /*
-               Fixed EMI is automatically counted.
-            */
             const person =
                 bs.find(
-                    b => b.id === x.borrower_id
+                    b =>
+                        b.id ===
+                        record.borrower_id
                 );
 
             if (person) {
+
                 regularPaid +=
                     +person.scheduled_emi || 0;
             }
 
             monthExtra +=
-                +x.extra_principal || 0;
+                +record.extra_principal || 0;
         });
 
-        totalPaid += regularPaid + monthExtra;
+        totalPaid +=
+            regularPaid +
+            monthExtra;
 
-        /*
-           Interest is paid first.
-        */
+
+        /* Interest is paid first */
+
         const interestPayment =
             Math.min(
                 regularPaid,
                 interest
             );
 
-        interestPaid += interestPayment;
+        interestPaid +=
+            interestPayment;
 
         unpaidInterest +=
             Math.max(
@@ -324,13 +379,12 @@ function calculateLoan(upToMonth = loan?.tenure_months || 0) {
                 interest - regularPaid
             );
 
-        /*
-           During interest-only period,
-           regular EMI does NOT reduce principal.
-        */
+
+        /* Regular EMI principal */
+
         let regularPrincipal = 0;
 
-        if (m > interestOnly) {
+        if (m > interestOnlyMonths) {
 
             regularPrincipal =
                 Math.min(
@@ -342,29 +396,34 @@ function calculateLoan(upToMonth = loan?.tenure_months || 0) {
                 );
         }
 
-        /*
-           Extra payment ALWAYS reduces principal.
-        */
-        const availableAfterRegular =
+
+        /* Extra payment directly reduces principal */
+
+        const availablePrincipal =
             Math.max(
                 0,
                 balance - regularPrincipal
             );
 
-        const extraPrincipal =
+        const actualExtra =
             Math.min(
                 monthExtra,
-                availableAfterRegular
+                availablePrincipal
             );
 
-        balance -=
-            regularPrincipal +
-            extraPrincipal;
+        balance =
+            Math.max(
+                0,
+                balance -
+                regularPrincipal -
+                actualExtra
+            );
 
-        balance = Math.max(0, balance);
+        principalPaid +=
+            regularPrincipal;
 
-        principalPaid += regularPrincipal;
-        extraPaid += extraPrincipal;
+        extraPaid +=
+            actualExtra;
     }
 
     return {
@@ -380,56 +439,84 @@ function calculateLoan(upToMonth = loan?.tenure_months || 0) {
 
 
 /* =========================================================
-   PERSON CALCULATION
+   PERSON STATISTICS
    ========================================================= */
 
 function personStats(person) {
 
     let emiPaid = 0;
     let extraPaid = 0;
-    let totalPaid = 0;
 
-    ps
-        .filter(x => x.borrower_id === person.id)
-        .forEach(x => {
+    const records =
+        ps.filter(
+            x =>
+                x.borrower_id ===
+                person.id
+        );
 
-            emiPaid +=
-                +person.scheduled_emi || 0;
+    records.forEach(record => {
 
-            extraPaid +=
-                +x.extra_principal || 0;
-        });
+        /*
+           Fixed EMI is counted automatically
+           for every saved payment month.
+        */
 
-    totalPaid =
+        emiPaid +=
+            +person.scheduled_emi || 0;
+
+        extraPaid +=
+            +record.extra_principal || 0;
+    });
+
+    const totalPaid =
         emiPaid +
         extraPaid;
 
-    const allPaid =
-        bs.reduce((sum, b) => {
 
-            const p =
-                ps.filter(
-                    x => x.borrower_id === b.id
-                ).length;
+    let everyonePaid = 0;
 
-            return sum +
-                p * (+b.scheduled_emi || 0) +
-                ps
-                    .filter(
-                        x => x.borrower_id === b.id
-                    )
-                    .reduce(
-                        (a, x) =>
-                            a + (+x.extra_principal || 0),
-                        0
-                    );
+    bs.forEach(b => {
 
-        }, 0);
+        const count =
+            ps.filter(
+                x =>
+                    x.borrower_id ===
+                    b.id
+            ).length;
+
+        const bEmi =
+            count *
+            (+b.scheduled_emi || 0);
+
+        const bExtra =
+            ps
+                .filter(
+                    x =>
+                        x.borrower_id ===
+                        b.id
+                )
+                .reduce(
+                    (sum, x) =>
+                        sum +
+                        (+x.extra_principal || 0),
+                    0
+                );
+
+        everyonePaid +=
+            bEmi +
+            bExtra;
+    });
+
 
     const contribution =
-        allPaid > 0
-            ? totalPaid / allPaid * 100
+        everyonePaid > 0
+            ? (
+                totalPaid /
+                everyonePaid *
+                100
+            )
             : 0;
+
 
     return {
         emiPaid,
@@ -448,8 +535,8 @@ function nav(id) {
 
     document
         .querySelectorAll(".screen")
-        .forEach(x =>
-            x.classList.remove("active")
+        .forEach(screen =>
+            screen.classList.remove("active")
         );
 
     if ($(id)) {
@@ -458,10 +545,10 @@ function nav(id) {
 
     document
         .querySelectorAll("nav button")
-        .forEach(x =>
-            x.classList.toggle(
+        .forEach(button =>
+            button.classList.toggle(
                 "active",
-                x.dataset.s === id
+                button.dataset.s === id
             )
         );
 
@@ -488,10 +575,10 @@ function nav(id) {
 
 document
     .querySelectorAll("nav button")
-    .forEach(x => {
+    .forEach(button => {
 
-        x.onclick = () =>
-            nav(x.dataset.s);
+        button.onclick = () =>
+            nav(button.dataset.s);
 
     });
 
@@ -512,13 +599,15 @@ async function load() {
 
     sync("");
 
-    const q =
+    const authResult =
         await db.auth.getUser();
 
     user =
-        q.data.user || null;
+        authResult.data.user ||
+        null;
 
-    const l =
+
+    const loanResult =
         await db
             .from("loans")
             .select("*")
@@ -526,44 +615,63 @@ async function load() {
             .limit(1)
             .maybeSingle();
 
-    if (l.error) {
 
-        toast(l.error.message);
+    if (loanResult.error) {
+
+        toast(
+            loanResult.error.message
+        );
+
         sync("bad");
 
         return;
     }
 
-    loan = l.data;
+
+    loan =
+        loanResult.data;
+
 
     if (loan) {
 
         const [
-            b,
-            p
+            borrowersResult,
+            paymentsResult
         ] = await Promise.all([
 
             db
                 .from("borrowers")
                 .select("*")
-                .eq("loan_id", loan.id)
+                .eq(
+                    "loan_id",
+                    loan.id
+                )
                 .order("sort_order"),
 
             db
                 .from("monthly_payments")
                 .select("*")
-                .eq("loan_id", loan.id)
+                .eq(
+                    "loan_id",
+                    loan.id
+                )
                 .order("month_no")
+
         ]);
 
-        bs = b.data || [];
-        ps = p.data || [];
+
+        bs =
+            borrowersResult.data || [];
+
+        ps =
+            paymentsResult.data || [];
 
     } else {
 
         bs = [];
         ps = [];
     }
+
 
     sync("ok");
 
@@ -582,18 +690,28 @@ function dashboard() {
         $("dashboard").innerHTML = `
 
             <div class="hero">
-                <small>DREAM HOME</small>
-                <strong>Public view ready</strong>
+
+                <small>
+                    DREAM HOME
+                </small>
+
+                <strong>
+                    Public view ready
+                </strong>
 
                 <div>
                     Owner sign-in is required
                     to create the cloud loan.
                 </div>
+
             </div>
+
 
             <div class="card">
 
-                <h2>Cloud setup</h2>
+                <h2>
+                    Cloud setup
+                </h2>
 
                 <p class="muted">
                     ${
@@ -611,22 +729,23 @@ function dashboard() {
                 </button>
 
             </div>
+
         `;
 
         return;
     }
 
 
-    const calc =
+    const calculation =
         calculateLoan(
             loan.tenure_months
         );
 
 
-    const minEMI =
+    const minimum =
         minimumEMI();
 
-    const fixEMI =
+    const fixed =
         fixedEMI();
 
 
@@ -635,7 +754,7 @@ function dashboard() {
             ? (
                 (
                     loan.total_amount -
-                    calc.balance
+                    calculation.balance
                 ) /
                 loan.total_amount
             ) * 100
@@ -657,7 +776,7 @@ function dashboard() {
             ? Math.min(
                 100,
                 (
-                    calc.monthsPaid /
+                    calculation.monthsPaid /
                     loan.tenure_months
                 ) * 100
             )
@@ -675,7 +794,7 @@ function dashboard() {
             </small>
 
             <strong>
-                ${M(calc.balance)}
+                ${M(calculation.balance)}
             </strong>
 
             <div>
@@ -701,7 +820,7 @@ function dashboard() {
                 </small>
 
                 <strong>
-                    ${M(minEMI)}
+                    ${M(minimum)}
                 </strong>
 
             </div>
@@ -714,7 +833,7 @@ function dashboard() {
                 </small>
 
                 <strong>
-                    ${M(fixEMI)}
+                    ${M(fixed)}
                 </strong>
 
             </div>
@@ -728,8 +847,8 @@ function dashboard() {
 
                 <strong>
                     ${M(
-                        calc.principalPaid +
-                        calc.extraPaid
+                        calculation.principalPaid +
+                        calculation.extraPaid
                     )}
                 </strong>
 
@@ -743,37 +862,10 @@ function dashboard() {
                 </small>
 
                 <strong>
-                    ${M(calc.interestPaid)}
+                    ${M(
+                        calculation.interestPaid
+                    )}
                 </strong>
-
-            </div>
-
-        </div>
-
-
-        <!-- LOAN PAID -->
-
-        <div class="card">
-
-            <div class="pt">
-
-                <h2>
-                    Loan Paid
-                </h2>
-
-                <b>
-                    ${safePercentage.toFixed(1)}%
-                </b>
-
-            </div>
-
-            <div class="bar">
-
-                <i
-                    style="
-                        width:${safePercentage}%
-                    "
-                ></i>
 
             </div>
 
@@ -791,7 +883,7 @@ function dashboard() {
                 </h2>
 
                 <b>
-                    ${calc.monthsPaid}
+                    ${calculation.monthsPaid}
                     /
                     ${loan.tenure_months}
                 </b>
@@ -811,11 +903,12 @@ function dashboard() {
         </div>
 
 
-        <!-- OWNER ACTIONS ONLY -->
+        <!-- OWNER ACTIONS -->
 
         ${
             edit()
                 ? `
+
                     <div class="actions">
 
                         <button
@@ -833,6 +926,7 @@ function dashboard() {
                         </button>
 
                     </div>
+
                 `
                 : ""
         }
@@ -870,12 +964,14 @@ function people() {
                 ${
                     edit()
                         ? `
+
                             <button
                                 class="btn soft"
                                 onclick="person()"
                             >
                                 ＋ Add
                             </button>
+
                         `
                         : ""
                 }
@@ -885,106 +981,135 @@ function people() {
 
             ${
                 bs.length
-                    ? bs.map((b, index) => {
+                    ? bs.map(
+                        (b, index) => {
 
-                        const s =
-                            personStats(b);
+                            const stats =
+                                personStats(b);
 
-                        return `
+                            return `
 
-                            <div
-                                class="person ${colors[index % colors.length]}"
-                            >
+                                <div
+                                    class="
+                                        person
+                                        ${colors[
+                                            index %
+                                            colors.length
+                                        ]}
+                                    "
+                                >
 
-                                <div class="pt">
+                                    <div class="pt">
 
-                                    <b>
-                                        ${esc(b.name)}
-                                    </b>
+                                        <b>
+                                            ${esc(
+                                                b.name
+                                            )}
+                                        </b>
 
-                                    <span class="pill">
-                                        ${M(
-                                            b.scheduled_emi
-                                        )}/mo
-                                    </span>
+                                        <span class="pill">
+                                            ${M(
+                                                b.scheduled_emi
+                                            )}/mo
+                                        </span>
+
+                                    </div>
+
+
+                                    <div class="row">
+
+                                        <span>
+                                            EMI amount paid
+                                        </span>
+
+                                        <b>
+                                            ${M(
+                                                stats.emiPaid
+                                            )}
+                                        </b>
+
+                                    </div>
+
+
+                                    <div class="row">
+
+                                        <span>
+                                            Extra principal paid
+                                        </span>
+
+                                        <b>
+                                            ${M(
+                                                stats.extraPaid
+                                            )}
+                                        </b>
+
+                                    </div>
+
+
+                                    <div class="row">
+
+                                        <span>
+                                            Total amount paid
+                                        </span>
+
+                                        <b>
+                                            ${M(
+                                                stats.totalPaid
+                                            )}
+                                        </b>
+
+                                    </div>
+
+
+                                    <div class="row">
+
+                                        <span>
+                                            Payment contribution
+                                        </span>
+
+                                        <b>
+                                            ${stats.contribution.toFixed(
+                                                1
+                                            )}%
+                                        </b>
+
+                                    </div>
+
+
+                                    ${
+                                        edit()
+                                            ? `
+
+                                                <button
+                                                    class="
+                                                        btn
+                                                        soft
+                                                    "
+                                                    onclick="
+                                                        person(
+                                                            '${b.id}'
+                                                        )
+                                                    "
+                                                >
+                                                    Edit
+                                                </button>
+
+                                            `
+                                            : ""
+                                    }
 
                                 </div>
 
+                            `;
 
-                                <div class="row">
-
-                                    <span>
-                                        EMI amount paid
-                                    </span>
-
-                                    <b>
-                                        ${M(s.emiPaid)}
-                                    </b>
-
-                                </div>
-
-
-                                <div class="row">
-
-                                    <span>
-                                        Extra principal paid
-                                    </span>
-
-                                    <b>
-                                        ${M(s.extraPaid)}
-                                    </b>
-
-                                </div>
-
-
-                                <div class="row">
-
-                                    <span>
-                                        Total amount paid
-                                    </span>
-
-                                    <b>
-                                        ${M(s.totalPaid)}
-                                    </b>
-
-                                </div>
-
-
-                                <div class="row">
-
-                                    <span>
-                                        Payment contribution
-                                    </span>
-
-                                    <b>
-                                        ${s.contribution.toFixed(1)}%
-                                    </b>
-
-                                </div>
-
-
-                                ${
-                                    edit()
-                                        ? `
-                                            <button
-                                                class="btn soft"
-                                                onclick="person('${b.id}')"
-                                            >
-                                                Edit
-                                            </button>
-                                        `
-                                        : ""
-                                }
-
-                            </div>
-
-                        `;
-
-                    }).join("")
+                        }
+                    ).join("")
                     : `
+
                         <div class="empty">
                             No borrowers added.
                         </div>
+
                     `
             }
 
@@ -1003,9 +1128,13 @@ function payments() {
     const months =
         [
             ...new Set(
-                ps.map(x => x.month_no)
+                ps.map(
+                    x => +x.month_no
+                )
             )
-        ].sort((a, b) => a - b);
+        ].sort(
+            (a, b) => a - b
+        );
 
 
     $("payments").innerHTML = `
@@ -1022,9 +1151,7 @@ function payments() {
 
                     <div class="muted">
 
-                        ${
-                            months.length
-                        }
+                        ${months.length}
                         month(s) saved
 
                     </div>
@@ -1035,12 +1162,14 @@ function payments() {
                 ${
                     edit()
                         ? `
+
                             <button
                                 class="btn primary"
                                 onclick="payment()"
                             >
                                 ＋ Add
                             </button>
+
                         `
                         : ""
                 }
@@ -1053,27 +1182,32 @@ function payments() {
                     ? months
                         .map(m => {
 
-                            const q =
+                            const records =
                                 ps.filter(
                                     x =>
-                                        x.month_no === m
+                                        +x.month_no ===
+                                        +m
                                 );
 
-                            const emi =
-                                q.reduce(
-                                    (a, x) => {
 
-                                        const b =
+                            const emi =
+                                records.reduce(
+                                    (
+                                        total,
+                                        record
+                                    ) => {
+
+                                        const person =
                                             bs.find(
-                                                z =>
-                                                    z.id ===
-                                                    x.borrower_id
+                                                b =>
+                                                    b.id ===
+                                                    record.borrower_id
                                             );
 
-                                        return a +
+                                        return total +
                                             (
-                                                b
-                                                    ? +b.scheduled_emi
+                                                person
+                                                    ? +person.scheduled_emi
                                                     : 0
                                             );
 
@@ -1083,10 +1217,16 @@ function payments() {
 
 
                             const extra =
-                                q.reduce(
-                                    (a, x) =>
-                                        a +
-                                        (+x.extra_principal || 0),
+                                records.reduce(
+                                    (
+                                        total,
+                                        record
+                                    ) =>
+                                        total +
+                                        (
+                                            +record.extra_principal ||
+                                            0
+                                        ),
                                     0
                                 );
 
@@ -1119,17 +1259,28 @@ function payments() {
                                     ${
                                         edit()
                                             ? `
+
                                                 <button
-                                                    class="btn soft"
-                                                    onclick="payment(${m})"
+                                                    class="
+                                                        btn
+                                                        soft
+                                                    "
+                                                    onclick="
+                                                        payment(
+                                                            ${m}
+                                                        )
+                                                    "
                                                 >
                                                     Edit
                                                 </button>
+
                                             `
                                             : `
+
                                                 <span class="pill">
                                                     Saved
                                                 </span>
+
                                             `
                                     }
 
@@ -1139,9 +1290,11 @@ function payments() {
 
                         }).join("")
                     : `
+
                         <div class="empty">
                             No payments recorded.
                         </div>
+
                     `
             }
 
@@ -1159,16 +1312,17 @@ function reports() {
 
     if (!loan) {
 
-        $("reports").innerHTML =
-            `<div class="empty">
+        $("reports").innerHTML = `
+            <div class="empty">
                 No loan created yet.
-            </div>`;
+            </div>
+        `;
 
         return;
     }
 
 
-    const calc =
+    const calculation =
         calculateLoan(
             loan.tenure_months
         );
@@ -1182,6 +1336,19 @@ function reports() {
         "person-e",
         "person-f"
     ];
+
+
+    const paidPercentage =
+        loan.total_amount > 0
+            ? (
+                (
+                    loan.total_amount -
+                    calculation.balance
+                ) /
+                loan.total_amount *
+                100
+            )
+            : 0;
 
 
     $("reports").innerHTML = `
@@ -1213,7 +1380,9 @@ function reports() {
                 </span>
 
                 <b>
-                    ${M(calc.balance)}
+                    ${M(
+                        calculation.balance
+                    )}
                 </b>
 
             </div>
@@ -1227,8 +1396,8 @@ function reports() {
 
                 <b>
                     ${M(
-                        calc.principalPaid +
-                        calc.extraPaid
+                        calculation.principalPaid +
+                        calculation.extraPaid
                     )}
                 </b>
 
@@ -1242,7 +1411,9 @@ function reports() {
                 </span>
 
                 <b>
-                    ${M(calc.interestPaid)}
+                    ${M(
+                        calculation.interestPaid
+                    )}
                 </b>
 
             </div>
@@ -1255,7 +1426,9 @@ function reports() {
                 </span>
 
                 <b>
-                    ${M(minimumEMI())}
+                    ${M(
+                        minimumEMI()
+                    )}
                 </b>
 
             </div>
@@ -1268,7 +1441,9 @@ function reports() {
                 </span>
 
                 <b>
-                    ${M(fixedEMI())}
+                    ${M(
+                        fixedEMI()
+                    )}
                 </b>
 
             </div>
@@ -1281,18 +1456,13 @@ function reports() {
                 </span>
 
                 <b>
-                    ${
-                        loan.total_amount
-                            ? (
-                                (
-                                    loan.total_amount -
-                                    calc.balance
-                                ) /
-                                loan.total_amount *
-                                100
-                            ).toFixed(1)
-                            : "0.0"
-                    }%
+                    ${Math.max(
+                        0,
+                        Math.min(
+                            100,
+                            paidPercentage
+                        )
+                    ).toFixed(1)}%
                 </b>
 
             </div>
@@ -1308,89 +1478,115 @@ function reports() {
 
 
             ${
-                bs.map((b, index) => {
+                bs.length
+                    ? bs.map(
+                        (b, index) => {
 
-                    const s =
-                        personStats(b);
+                            const stats =
+                                personStats(b);
 
-                    return `
+                            return `
 
-                        <div
-                            class="person ${colors[index % colors.length]}"
-                        >
+                                <div
+                                    class="
+                                        person
+                                        ${colors[
+                                            index %
+                                            colors.length
+                                        ]}
+                                    "
+                                >
 
-                            <div class="pt">
+                                    <div class="pt">
 
-                                <h3>
-                                    ${esc(b.name)}
-                                </h3>
+                                        <h3>
+                                            ${esc(
+                                                b.name
+                                            )}
+                                        </h3>
 
-                                <span class="pill">
-                                    Fixed EMI
-                                    ${M(
-                                        b.scheduled_emi
-                                    )}
-                                </span>
+                                        <span class="pill">
+                                            Fixed EMI
+                                            ${M(
+                                                b.scheduled_emi
+                                            )}
+                                        </span>
 
-                            </div>
-
-
-                            <div class="row">
-
-                                <span>
-                                    EMI amount paid
-                                </span>
-
-                                <b>
-                                    ${M(s.emiPaid)}
-                                </b>
-
-                            </div>
+                                    </div>
 
 
-                            <div class="row">
+                                    <div class="row">
 
-                                <span>
-                                    Extra principal paid
-                                </span>
+                                        <span>
+                                            EMI amount paid
+                                        </span>
 
-                                <b>
-                                    ${M(s.extraPaid)}
-                                </b>
+                                        <b>
+                                            ${M(
+                                                stats.emiPaid
+                                            )}
+                                        </b>
 
-                            </div>
-
-
-                            <div class="row">
-
-                                <span>
-                                    Total amount paid
-                                </span>
-
-                                <b>
-                                    ${M(s.totalPaid)}
-                                </b>
-
-                            </div>
+                                    </div>
 
 
-                            <div class="row">
+                                    <div class="row">
 
-                                <span>
-                                    Payment contribution
-                                </span>
+                                        <span>
+                                            Extra principal paid
+                                        </span>
 
-                                <b>
-                                    ${s.contribution.toFixed(1)}%
-                                </b>
+                                        <b>
+                                            ${M(
+                                                stats.extraPaid
+                                            )}
+                                        </b>
 
-                            </div>
+                                    </div>
 
+
+                                    <div class="row">
+
+                                        <span>
+                                            Total amount paid
+                                        </span>
+
+                                        <b>
+                                            ${M(
+                                                stats.totalPaid
+                                            )}
+                                        </b>
+
+                                    </div>
+
+
+                                    <div class="row">
+
+                                        <span>
+                                            Payment contribution
+                                        </span>
+
+                                        <b>
+                                            ${stats.contribution.toFixed(
+                                                1
+                                            )}%
+                                        </b>
+
+                                    </div>
+
+                                </div>
+
+                            `;
+
+                        }
+                    ).join("")
+                    : `
+
+                        <div class="empty">
+                            No borrowers added.
                         </div>
 
-                    `;
-
-                }).join("")
+                    `
             }
 
         </div>
@@ -1432,9 +1628,10 @@ function more() {
 
 
             <button
-                class="btn ${
-                    user ? "soft" : "primary"
-                }"
+                class="
+                    btn
+                    ${user ? "soft" : "primary"}
+                "
                 onclick="${
                     user
                         ? "out()"
@@ -1463,6 +1660,7 @@ function more() {
             ${
                 edit()
                     ? `
+
                         <div class="row">
 
                             <b>
@@ -1477,6 +1675,7 @@ function more() {
                             </button>
 
                         </div>
+
                     `
                     : ""
             }
@@ -1507,35 +1706,44 @@ function more() {
    MODAL
    ========================================================= */
 
-function modal(h) {
+function modal(html) {
 
-    $("mb").innerHTML = h;
+    $("mb").innerHTML =
+        html;
 
-    $("modal").classList.add("open");
+    $("modal").classList.add(
+        "open"
+    );
 }
 
 
 function close() {
 
-    $("modal").classList.remove("open");
-
+    $("modal").classList.remove(
+        "open"
+    );
 }
 
 
-$("x").onclick = close;
+$("x").onclick =
+    close;
 
 
-$("modal").onclick = e => {
+$("modal").onclick =
+    event => {
 
-    if (e.target === $("modal")) {
-        close();
-    }
+        if (
+            event.target ===
+            $("modal")
+        ) {
+            close();
+        }
 
-};
+    };
 
 
 /* =========================================================
-   AUTHENTICATION
+   AUTH
    ========================================================= */
 
 function auth() {
@@ -1563,6 +1771,7 @@ function auth() {
 
 
         <label>
+
             Email
 
             <input
@@ -1575,6 +1784,7 @@ function auth() {
 
 
         <label>
+
             Password
 
             <input
@@ -1607,16 +1817,20 @@ function auth() {
 
 async function login() {
 
-    const q =
+    const result =
         await db.auth.signInWithPassword({
-            email: $("ae").value,
-            password: $("ap").value
+            email:
+                $("ae").value.trim(),
+            password:
+                $("ap").value
         });
 
 
-    if (q.error) {
+    if (result.error) {
 
-        toast(q.error.message);
+        toast(
+            result.error.message
+        );
 
         return;
     }
@@ -1624,7 +1838,9 @@ async function login() {
 
     close();
 
-    toast("Signed in successfully");
+    toast(
+        "Signed in successfully"
+    );
 
     load();
 }
@@ -1632,23 +1848,27 @@ async function login() {
 
 async function signup() {
 
-    const q =
+    const result =
         await db.auth.signUp({
-            email: $("ae").value,
-            password: $("ap").value
+            email:
+                $("ae").value.trim(),
+            password:
+                $("ap").value
         });
 
 
-    if (q.error) {
+    if (result.error) {
 
-        toast(q.error.message);
+        toast(
+            result.error.message
+        );
 
         return;
     }
 
 
     toast(
-        q.data.user
+        result.data.user
             ? "Owner account created"
             : "Account created"
     );
@@ -1663,7 +1883,9 @@ async function out() {
 
     await db.auth.signOut();
 
-    toast("Signed out");
+    toast(
+        "Signed out"
+    );
 
     load();
 }
@@ -1698,7 +1920,9 @@ function loanEdit() {
 
                 <input
                     id="ln"
-                    value="${esc(loan.name)}"
+                    value="${esc(
+                        loan.name
+                    )}"
                 >
 
             </label>
@@ -1751,7 +1975,7 @@ function loanEdit() {
                 <input
                     id="ls"
                     type="date"
-                    value="${loan.start_date}"
+                    value="${loan.start_date || ""}"
                 >
 
             </label>
@@ -1765,7 +1989,10 @@ function loanEdit() {
                     id="li"
                     type="number"
                     min="0"
-                    value="${loan.interest_only_months || 0}"
+                    value="${
+                        loan.interest_only_months ||
+                        0
+                    }"
                 >
 
             </label>
@@ -1776,10 +2003,11 @@ function loanEdit() {
         <p class="muted">
 
             Minimum EMI is automatically calculated
-            from loan amount, interest rate and tenure.
+            from the loan amount, interest rate and
+            tenure.
 
-            Fixed EMI is the total of the fixed EMI
-            amounts assigned to all people.
+            Fixed EMI is the total fixed EMI of all
+            people.
 
         </p>
 
@@ -1797,7 +2025,7 @@ function loanEdit() {
 
 async function saveLoan() {
 
-    const v = {
+    const values = {
 
         name:
             $("ln").value.trim() ||
@@ -1823,18 +2051,23 @@ async function saveLoan() {
     };
 
 
-    const q =
+    const result =
         await db
             .from("loans")
-            .update(v)
-            .eq("id", loan.id)
+            .update(values)
+            .eq(
+                "id",
+                loan.id
+            )
             .select()
             .single();
 
 
-    if (q.error) {
+    if (result.error) {
 
-        toast(q.error.message);
+        toast(
+            result.error.message
+        );
 
         return;
     }
@@ -1842,14 +2075,16 @@ async function saveLoan() {
 
     close();
 
-    toast("Loan settings saved");
+    toast(
+        "Loan settings saved"
+    );
 
     load();
 }
 
 
 /* =========================================================
-   PERSON
+   PERSON SETTINGS
    ========================================================= */
 
 function person(id) {
@@ -1863,7 +2098,9 @@ function person(id) {
 
 
     const b =
-        bs.find(x => x.id === id) || {
+        bs.find(
+            x => x.id === id
+        ) || {
 
             name: "New Person",
             scheduled_emi: 0
@@ -1884,7 +2121,9 @@ function person(id) {
 
             <input
                 id="bn"
-                value="${esc(b.name)}"
+                value="${esc(
+                    b.name
+                )}"
             >
 
         </label>
@@ -1897,7 +2136,9 @@ function person(id) {
             <input
                 id="be"
                 type="number"
-                value="${b.scheduled_emi || ""}"
+                value="${
+                    b.scheduled_emi || ""
+                }"
             >
 
         </label>
@@ -1905,16 +2146,20 @@ function person(id) {
 
         <p class="muted">
 
-            Fixed EMI is included automatically
+            Fixed EMI is automatically counted
             when this person's monthly payment
-            is marked as paid.
+            is saved.
 
         </p>
 
 
         <button
             class="btn primary"
-            onclick="savePerson('${id || ""}')"
+            onclick="
+                savePerson(
+                    '${id || ""}'
+                )
+            "
         >
             Save borrower
         </button>
@@ -1923,12 +2168,18 @@ function person(id) {
         ${
             id
                 ? `
+
                     <button
                         class="btn danger"
-                        onclick="delPerson('${id}')"
+                        onclick="
+                            delPerson(
+                                '${id}'
+                            )
+                        "
                     >
                         Delete
                     </button>
+
                 `
                 : ""
         }
@@ -1939,7 +2190,7 @@ function person(id) {
 
 async function savePerson(id) {
 
-    const v = {
+    const values = {
 
         loan_id:
             loan.id,
@@ -1962,25 +2213,28 @@ async function savePerson(id) {
     };
 
 
-    const q =
+    const result =
         id
+
             ? await db
                 .from("borrowers")
-                .update(v)
+                .update(values)
                 .eq("id", id)
                 .select()
                 .single()
 
             : await db
                 .from("borrowers")
-                .insert(v)
+                .insert(values)
                 .select()
                 .single();
 
 
-    if (q.error) {
+    if (result.error) {
 
-        toast(q.error.message);
+        toast(
+            result.error.message
+        );
 
         return;
     }
@@ -1988,7 +2242,9 @@ async function savePerson(id) {
 
     close();
 
-    toast("Borrower saved");
+    toast(
+        "Borrower saved"
+    );
 
     load();
 }
@@ -2000,19 +2256,23 @@ async function delPerson(id) {
         !confirm(
             "Delete borrower and their payments?"
         )
-    ) return;
+    ) {
+        return;
+    }
 
 
-    const q =
+    const result =
         await db
             .from("borrowers")
             .delete()
             .eq("id", id);
 
 
-    if (q.error) {
+    if (result.error) {
 
-        toast(q.error.message);
+        toast(
+            result.error.message
+        );
 
         return;
     }
@@ -2020,7 +2280,9 @@ async function delPerson(id) {
 
     close();
 
-    toast("Borrower deleted");
+    toast(
+        "Borrower deleted"
+    );
 
     load();
 }
@@ -2040,20 +2302,29 @@ function payment(existingMonth) {
     }
 
 
-    let m =
-        existingMonth || 1;
-
-
     /*
+       If editing an existing payment,
+       use that month.
+
        If adding a new payment,
-       show a month dropdown instead of
-       asking for 1,2,3...
+       start with the first EMI month.
     */
+
+    const selectedMonth =
+        existingMonth
+            ? +existingMonth
+            : 1;
+
 
     modal(`
 
         <h2>
-            ${existingMonth ? "Edit" : "Add"} Payment
+            ${
+                existingMonth
+                    ? "Edit"
+                    : "Add"
+            }
+            Payment
         </h2>
 
 
@@ -2062,7 +2333,11 @@ function payment(existingMonth) {
             EMI Month
 
             <select id="pm">
-                ${monthOptions()}
+
+                ${monthOptions(
+                    selectedMonth
+                )}
+
             </select>
 
         </label>
@@ -2090,20 +2365,25 @@ function payment(existingMonth) {
     `);
 
 
-    $("pm").value = m;
+    const monthSelect =
+        $("pm");
 
 
     function renderPaymentPeople() {
 
         const month =
-            +$("pm").value;
+            +monthSelect.value;
 
 
         $("prs").innerHTML =
             bs.map(b => {
 
-                const e =
-                    pay(month, b.id);
+                const existing =
+                    pay(
+                        month,
+                        b.id
+                    );
+
 
                 return `
 
@@ -2112,14 +2392,18 @@ function payment(existingMonth) {
                         <div class="pt">
 
                             <b>
-                                ${esc(b.name)}
+                                ${esc(
+                                    b.name
+                                )}
                             </b>
 
                             <span class="pill">
+
                                 Fixed EMI
                                 ${M(
                                     b.scheduled_emi
                                 )}
+
                             </span>
 
                         </div>
@@ -2135,7 +2419,8 @@ function payment(existingMonth) {
                                 min="0"
                                 step="1"
                                 value="${
-                                    e.extra_principal || ""
+                                    existing.extra_principal ||
+                                    ""
                                 }"
                             >
 
@@ -2161,7 +2446,7 @@ function payment(existingMonth) {
     }
 
 
-    $("pm").onchange =
+    monthSelect.onchange =
         renderPaymentPeople;
 
 
@@ -2169,15 +2454,21 @@ function payment(existingMonth) {
 }
 
 
+/* =========================================================
+   SAVE PAYMENT
+   ========================================================= */
+
 async function savePayment() {
 
-    const m =
+    const month =
         +$("pm").value;
 
 
-    if (!m) {
+    if (!month) {
 
-        toast("Please select EMI month");
+        toast(
+            "Please select EMI month"
+        );
 
         return;
     }
@@ -2186,14 +2477,12 @@ async function savePayment() {
     for (const b of bs) {
 
         const extra =
-            +$("x" + b.id).value || 0;
+            +$(
+                "x" + b.id
+            ).value || 0;
 
 
-        const old =
-            pay(m, b.id);
-
-
-        const v = {
+        const values = {
 
             loan_id:
                 loan.id,
@@ -2202,15 +2491,16 @@ async function savePayment() {
                 b.id,
 
             month_no:
-                m,
+                month,
 
             payment_date:
-                new Date().toISOString()
+                new Date()
+                    .toISOString()
                     .slice(0, 10),
 
             /*
-               Fixed EMI is not manually entered.
-               It is calculated from borrower settings.
+               Fixed EMI comes automatically
+               from borrower settings.
             */
 
             emi_paid:
@@ -2222,11 +2512,11 @@ async function savePayment() {
         };
 
 
-        const q =
+        const result =
             await db
                 .from("monthly_payments")
                 .upsert(
-                    v,
+                    values,
                     {
                         onConflict:
                             "loan_id,borrower_id,month_no"
@@ -2234,9 +2524,11 @@ async function savePayment() {
                 );
 
 
-        if (q.error) {
+        if (result.error) {
 
-            toast(q.error.message);
+            toast(
+                result.error.message
+            );
 
             return;
         }
@@ -2246,19 +2538,11 @@ async function savePayment() {
     close();
 
     toast(
-        existingPaymentMessage(m)
+        "Payment saved for " +
+        monthLabel(month)
     );
 
     load();
-}
-
-
-function existingPaymentMessage(m) {
-
-    return (
-        "Payment saved for " +
-        monthLabel(m)
-    );
 }
 
 
@@ -2268,7 +2552,9 @@ function existingPaymentMessage(m) {
 
 function history() {
 
-    if (!loan) return;
+    if (!loan) {
+        return;
+    }
 
 
     let rows = "";
@@ -2276,20 +2562,25 @@ function history() {
 
     for (
         let m = 1;
-        m <= loan.tenure_months;
+        m <= +loan.tenure_months;
         m++
     ) {
 
         for (const b of bs) {
 
-            const e =
-                pay(m, b.id);
+            const existing =
+                pay(
+                    m,
+                    b.id
+                );
 
 
             if (
-                !e.emi_paid &&
-                !e.extra_principal
-            ) continue;
+                !existing.emi_paid &&
+                !existing.extra_principal
+            ) {
+                continue;
+            }
 
 
             rows += `
@@ -2301,7 +2592,9 @@ function history() {
                     </td>
 
                     <td>
-                        ${esc(b.name)}
+                        ${esc(
+                            b.name
+                        )}
                     </td>
 
                     <td>
@@ -2312,7 +2605,7 @@ function history() {
 
                     <td>
                         ${M(
-                            e.extra_principal
+                            existing.extra_principal
                         )}
                     </td>
 
@@ -2333,6 +2626,7 @@ function history() {
         ${
             rows
                 ? `
+
                     <div class="table">
 
                         <table>
@@ -2362,11 +2656,14 @@ function history() {
                         </table>
 
                     </div>
+
                 `
                 : `
+
                     <div class="empty">
                         No payments saved.
                     </div>
+
                 `
         }
 
@@ -2401,7 +2698,9 @@ if (db) {
    SERVICE WORKER
    ========================================================= */
 
-if ("serviceWorker" in navigator) {
+if (
+    "serviceWorker" in navigator
+) {
 
     navigator.serviceWorker.register(
         "./sw.js"
